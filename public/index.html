@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#111820" />
+    <title>CustomRP Studio — Discord Animated Presence</title>
+    <meta name="description" content="Set a custom animated Discord rich presence using image frames uploaded to the cloud." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+
+      <!-- ═══════════════════════════════════ TOPBAR ═══════════════════════ -->
+      <header class="topbar" role="banner">
+        <div class="topbar-brand">
+          <span class="brand-mark">✦</span>
+          <div>
+            <div class="brand-name">CustomRP Studio</div>
+            <div class="brand-caption">Animated Discord Presence</div>
+          </div>
+        </div>
+
+        <div class="topbar-status">
+          <span id="bridge-dot" class="status-dot"></span>
+          <span id="bridge-copy" class="bridge-copy-inline">Waiting for Discord</span>
+        </div>
+
+        <div class="topbar-actions">
+          <label class="switch-label"><input id="autosave" type="checkbox" checked /><span class="switch"></span>Autosave</label>
+          <button id="disconnect" class="button button-ghost" type="button">Disconnect</button>
+          <button id="connect" class="button button-primary" type="button">Connect Discord <span class="button-arrow">↗</span></button>
+        </div>
+      </header>
+
+      <div id="notice" class="notice" role="status" aria-live="polite"></div>
+
+      <!-- ═══════════════════════════════════ MAIN GRID ════════════════════ -->
+      <main class="studio-grid" role="main">
+
+        <!-- ── LEFT: Editor ─────────────────────────────────────────────── -->
+        <form id="presence-form" class="editor-column">
+
+          <!-- §01 Identity -->
+          <section id="identity" class="editor-section">
+            <div class="section-heading">
+              <div><span class="section-number">01</span><h2>Identity</h2></div>
+              <span class="section-hint">How Discord labels your activity</span>
+            </div>
+            <div class="field-grid field-grid-3">
+              <label class="field field-span-2"><span>Application ID <span class="required">*</span></span><input data-field="applicationId" inputmode="numeric" placeholder="Your Discord application ID" required /></label>
+              <label class="field"><span>Activity type</span><select data-field="type"><option value="0">Playing</option><option value="2">Listening to</option><option value="3">Watching</option><option value="5">Competing in</option></select></label>
+              <label class="field"><span>Activity name</span><input data-field="name" maxlength="128" placeholder="My awesome project" /></label>
+              <label class="field"><span>Display as</span><select data-field="display"><option value="0">Application name</option><option value="1">Details</option><option value="2">State</option></select></label>
+            </div>
+            <div class="field-note"><span class="info-icon">i</span>Use the application ID from Discord Developer Portal. The local bridge uses Discord IPC; no bot token is required.</div>
+          </section>
+
+          <!-- §02 Activity Copy -->
+          <section id="copy" class="editor-section">
+            <div class="section-heading">
+              <div><span class="section-number">02</span><h2>Activity copy</h2></div>
+              <span class="section-hint">Two lines, links optional</span>
+            </div>
+            <div class="field-grid">
+              <label class="field"><span>Details <span class="counter" data-counter-for="details">0 / 128</span></span><input data-field="details" maxlength="128" placeholder="Designing something new" /></label>
+              <label class="field"><span>Details URL <span class="optional">optional</span></span><input data-field="detailsUrl" type="url" placeholder="https://example.com" /></label>
+              <label class="field"><span>State <span class="counter" data-counter-for="state">0 / 128</span></span><input data-field="state" maxlength="128" placeholder="In the zone" /></label>
+              <label class="field"><span>State URL <span class="optional">optional</span></span><input data-field="stateUrl" type="url" placeholder="https://example.com" /></label>
+            </div>
+          </section>
+
+          <!-- §03 Animation Frames ★ NEW ★ -->
+          <section id="animation" class="editor-section">
+            <div class="section-heading">
+              <div><span class="section-number">03</span><h2>Animation Frames</h2></div>
+              <span class="section-hint">Up to 20 frames · 0.2 s cycle</span>
+            </div>
+
+            <!-- Upload zone -->
+            <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="Drop images or click to upload">
+              <div class="drop-zone-inner">
+                <div class="drop-zone-icon">⬆</div>
+                <div class="drop-zone-title">Drop images here or <span class="drop-zone-link">browse</span></div>
+                <div class="drop-zone-sub">PNG · JPG · WEBP · GIF · up to 20 frames</div>
+              </div>
+              <input id="frame-file-input" type="file" multiple accept="image/png,image/jpeg,image/jpg,image/gif,image/webp" hidden />
+            </div>
+
+            <!-- ZIP upload -->
+            <div class="zip-row">
+              <button id="upload-zip-btn" class="button button-ghost" type="button">📦 Upload ZIP of frames</button>
+              <input id="zip-file-input" type="file" accept=".zip,application/zip" hidden />
+              <span class="zip-hint">Images in ZIP are sorted by filename</span>
+            </div>
+
+            <!-- Frame count + interval -->
+            <div class="anim-controls">
+              <div class="anim-stat">
+                <span class="anim-stat-label">Frames loaded</span>
+                <span id="frame-count" class="anim-stat-value">0</span>
+              </div>
+              <label class="anim-stat">
+                <span class="anim-stat-label">Interval (ms)</span>
+                <input id="anim-interval" class="anim-interval-input" type="number" min="50" max="2000" value="200" />
+              </label>
+            </div>
+
+            <!-- Frame grid -->
+            <div id="frame-grid" class="frame-grid" aria-label="Animation frames"></div>
+
+            <!-- Action bar -->
+            <div class="anim-actions">
+              <button id="anim-play-btn" class="button button-primary" type="button" disabled>▶ Start Animation</button>
+              <button id="anim-stop-btn" class="button button-ghost" type="button" disabled>■ Stop</button>
+              <button id="anim-clear-btn" class="button button-danger-ghost" type="button">✕ Clear all</button>
+            </div>
+
+            <div class="field-note"><span class="info-icon">i</span>Frames are stored in UploadThing cloud and your database. Discord animates them by cycling through each image URL every interval milliseconds — a workaround for Discord's lack of native GIF support in Rich Presence.</div>
+          </section>
+
+          <!-- §04 Static Assets -->
+          <section id="assets" class="editor-section">
+            <div class="section-heading">
+              <div><span class="section-number">04</span><h2>Static assets</h2></div>
+              <a class="section-link" id="assets-link" href="#" target="_blank" rel="noreferrer">Developer Portal ↗</a>
+            </div>
+            <div class="asset-grid">
+              <div class="asset-card large-asset">
+                <div class="asset-card-top"><span class="asset-label">LARGE IMAGE</span><span class="asset-size">512 × 512</span></div>
+                <label class="field"><span>Key or image URL</span><input data-field="largeKey" placeholder="large_image_key" /></label>
+                <label class="field"><span>Hover text</span><input data-field="largeText" placeholder="Main artwork" /></label>
+                <label class="field"><span>Click URL <span class="optional">optional</span></span><input data-field="largeUrl" type="url" placeholder="https://example.com" /></label>
+              </div>
+              <div class="asset-card small-asset">
+                <div class="asset-card-top"><span class="asset-label">SMALL IMAGE</span><span class="asset-size">256 × 256</span></div>
+                <label class="field"><span>Key or image URL</span><input data-field="smallKey" placeholder="small_image_key" /></label>
+                <label class="field"><span>Hover text</span><input data-field="smallText" placeholder="Status badge" /></label>
+                <label class="field"><span>Click URL <span class="optional">optional</span></span><input data-field="smallUrl" type="url" placeholder="https://example.com" /></label>
+              </div>
+            </div>
+            <div class="field-note"><span class="info-icon">i</span>When animation is active, the large image is overridden by the cycling frames. Static key is used as the first frame fallback.</div>
+          </section>
+
+          <!-- §05 Party & Time -->
+          <section id="party" class="editor-section">
+            <div class="section-heading">
+              <div><span class="section-number">05</span><h2>Party &amp; time</h2></div>
+              <span class="section-hint">Optional live context</span>
+            </div>
+            <div class="field-grid party-grid">
+              <label class="field"><span>Party size</span><input data-field="partySize" type="number" min="0" max="9999" value="0" /></label>
+              <label class="field"><span>Party max</span><input data-field="partyMax" type="number" min="0" max="9999" value="0" /></label>
+              <div class="field timestamp-field"><span>Timestamp</span><select data-field="timestampMode"><option value="last-connection">Since connection</option><option value="startup">Since app startup</option><option value="local-time">Local time</option><option value="presence-update">Since presence update</option><option value="custom">Custom</option></select></div>
+            </div>
+            <div id="custom-timestamps" class="custom-timestamps hidden">
+              <label class="field"><span>Start</span><input data-field="customTimestampStart" type="datetime-local" /></label>
+              <label class="field checkbox-field"><span>Use an end time</span><input data-field="customTimestampEndEnabled" type="checkbox" /></label>
+              <label id="custom-end-field" class="field hidden"><span>End</span><input data-field="customTimestampEnd" type="datetime-local" /></label>
+            </div>
+          </section>
+
+          <!-- §06 Buttons -->
+          <section id="buttons" class="editor-section">
+            <div class="section-heading">
+              <div><span class="section-number">06</span><h2>Buttons</h2></div>
+              <span class="section-hint">Up to two clickable links</span>
+            </div>
+            <div class="button-editor-grid">
+              <div class="rpc-button-row"><span class="button-index">01</span><label class="field"><span>Label</span><input data-field="button1Text" maxlength="32" placeholder="Open portfolio" /></label><label class="field"><span>URL</span><input data-field="button1Url" type="url" placeholder="https://example.com" /></label></div>
+              <div class="rpc-button-row"><span class="button-index">02</span><label class="field"><span>Label</span><input data-field="button2Text" maxlength="32" placeholder="Say hello" /></label><label class="field"><span>URL</span><input data-field="button2Url" type="url" placeholder="https://example.com" /></label></div>
+            </div>
+          </section>
+
+          <!-- §07 Presets -->
+          <section id="presets" class="editor-section presets-section">
+            <div class="section-heading">
+              <div><span class="section-number">07</span><h2>Presets</h2></div>
+              <span class="section-hint">Portable .crp files</span>
+            </div>
+            <div class="preset-actions">
+              <button id="import-preset" class="button button-ghost" type="button">Import preset</button>
+              <input id="preset-file" type="file" accept=".crp,.json,.txt,application/json,text/xml,application/xml" hidden />
+              <button id="export-preset" class="button button-ghost" type="button">Export .crp</button>
+              <button id="reset-form" class="button button-danger-ghost" type="button">Reset editor</button>
+            </div>
+            <p class="section-footnote">Presets are stored in your browser and can be shared as legacy-compatible XML files.</p>
+          </section>
+        </form>
+
+        <!-- ── RIGHT: Preview ───────────────────────────────────────────── -->
+        <aside class="preview-column" aria-label="Live preview">
+          <div class="preview-sticky">
+            <div class="preview-header">
+              <div><div class="eyebrow">LIVE PREVIEW</div><h2>Discord card</h2></div>
+              <span class="preview-live"><span class="live-dot"></span>Local</span>
+            </div>
+
+            <div class="discord-window">
+              <div class="discord-window-top"><span class="discord-brand"><span class="discord-glyph">◖</span> Discord</span><span class="window-dots">•••</span></div>
+              <div class="discord-profile-row"><div class="avatar">A</div><div><div class="profile-name">Alex <span class="profile-tag">you</span></div><div class="profile-sub">Online</div></div></div>
+              <div class="presence-card">
+                <div class="presence-title"><span id="preview-type">Playing</span> <span id="preview-name">CustomRP</span></div>
+                <div class="presence-body">
+                  <div class="preview-art-wrap">
+                    <div id="large-art" class="preview-art large-art"><span>✦</span></div>
+                    <div id="small-art" class="preview-art small-art"><span>◉</span></div>
+                  </div>
+                  <div class="presence-lines">
+                    <div id="preview-details" class="presence-detail">Designing something new</div>
+                    <div id="preview-state" class="presence-state">In the zone</div>
+                    <div id="preview-time" class="presence-time">00:00 elapsed</div>
+                    <div id="preview-party" class="presence-party hidden">◉ <span>0 / 0</span></div>
+                  </div>
+                </div>
+                <div id="preview-buttons" class="preview-buttons"></div>
+              </div>
+              <div class="discord-input">Message #general <span>＋</span></div>
+            </div>
+
+            <!-- Animation preview strip -->
+            <div id="anim-preview-strip" class="anim-preview-strip hidden">
+              <div class="anim-strip-label"><span class="live-dot"></span>Animation active · <span id="anim-strip-count">0</span> frames</div>
+              <div id="anim-strip-frames" class="anim-strip-frames"></div>
+            </div>
+
+            <div class="preview-caption"><span class="caption-icon">⌁</span><span>Preview updates as you type. Connect to push to Discord.</span></div>
+            <div class="quick-actions"><button id="quick-update" class="button button-primary button-full" type="button">Update presence <span class="button-arrow">↗</span></button></div>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>
