@@ -24,10 +24,16 @@ export class DiscordBridge {
   private smallFrames: string[] = [];
   private largeIndex = 0;
   private smallIndex = 0;
-  private animationIntervalMs = 50;
+  private animationIntervalMs = 5000;
   private animationTimeout: NodeJS.Timeout | null = null;
+  private isAnimationRunning = false;
   private healthRefreshInterval: NodeJS.Timeout | null = null;
   private isTicking = false;
+
+  /** Concurrency and rate-limit guard */
+  private isUpdating = false;
+  private pendingUpdate: PresenceConfig | null = null;
+  private lastUpdateTime = 0;
 
   status(): BridgeStatus {
     return {
@@ -42,24 +48,24 @@ export class DiscordBridge {
     return this.largeFrames.length >= 2 || this.smallFrames.length >= 2;
   }
 
-  /** Set the frame URLs for animation cycling. */
+  /** Set the frame URLs for animation cycling. Clamped to safe 4s+ interval for Discord RPC. */
   setAnimationFrames(
     targetOrUrls: "large" | "small" | string[],
     urlsOrInterval?: string[] | number,
-    maybeInterval = 50
+    maybeInterval = 5000
   ): void {
     let target: "large" | "small" = "large";
     let urls: string[] = [];
-    let interval = 50;
+    let interval = 5000;
 
     if (targetOrUrls === "large" || targetOrUrls === "small") {
       target = targetOrUrls;
       urls = Array.isArray(urlsOrInterval) ? urlsOrInterval : [];
-      interval = typeof maybeInterval === "number" ? maybeInterval : 50;
+      interval = typeof maybeInterval === "number" ? maybeInterval : 5000;
     } else if (Array.isArray(targetOrUrls)) {
       target = "large";
       urls = targetOrUrls;
-      interval = typeof urlsOrInterval === "number" ? urlsOrInterval : 50;
+      interval = typeof urlsOrInterval === "number" ? urlsOrInterval : 5000;
     }
 
     const formatted = urls.map(formatImageUrl);
@@ -70,14 +76,27 @@ export class DiscordBridge {
       this.largeFrames = formatted;
       this.largeIndex = 0;
     }
-    this.animationIntervalMs = Math.max(interval, 50);
+    // Discord RPC strictly limits presence updates. Clamp interval to min 4000ms.
+    this.animationIntervalMs = Math.max(interval, 4000);
 
-    if (this.client && this.config) {
-      this.restartAnimationLoop();
+    if (urls.length >= 2) {
+      this.isAnimationRunning = true;
+      if (this.client && this.config) {
+        this.restartAnimationLoop();
+      }
+    } else {
+      this.isAnimationRunning = false;
+      this.stopAnimationLoop();
     }
   }
 
-  /** Sync frames list from Postgres database for both targets. */
+  /** Stop the Discord animation cycling */
+  stopAnimation(): void {
+    this.isAnimationRunning = false;
+    this.stopAnimationLoop();
+  }
+
+  /** Sync frames list from Postgres database for both targets without starting loop. */
   async syncFramesFromDb(intervalMs?: number): Promise<void> {
     try {
       const [largeDb, smallDb] = await Promise.all([
@@ -89,10 +108,7 @@ export class DiscordBridge {
       this.largeIndex = 0;
       this.smallIndex = 0;
       if (intervalMs) {
-        this.animationIntervalMs = Math.max(intervalMs, 50);
-      }
-      if (this.client && this.config) {
-        this.restartAnimationLoop();
+        this.animationIntervalMs = Math.max(intervalMs, 4000);
       }
     } catch (err) {
       console.warn("Could not sync frames from DB:", err instanceof Error ? err.message : err);
@@ -112,13 +128,12 @@ export class DiscordBridge {
       this.connectedAt = Date.now();
       this.lastError = null;
 
-      // Auto-load animation frames from DB if not already set in memory
-      if (!this.hasAnimation()) {
+      // Sync frames from DB if not loaded yet
+      if (this.largeFrames.length === 0 && this.smallFrames.length === 0) {
         await this.syncFramesFromDb();
       }
 
       await this.update(config);
-      this.restartAnimationLoop();
       return this.status();
     } catch (error) {
       try {
@@ -141,25 +156,50 @@ export class DiscordBridge {
 
     this.config = config;
 
-    // Active frames so we don't flash back to static
-    const activeLarge =
-      this.largeFrames.length >= 2
-        ? this.largeFrames[this.largeIndex % this.largeFrames.length]
-        : undefined;
-    const activeSmall =
-      this.smallFrames.length >= 2
-        ? this.smallFrames[this.smallIndex % this.smallFrames.length]
-        : undefined;
+    // Rate-limit guard: Discord drops connection if setActivity is spammed faster than ~1.5s
+    const now = Date.now();
+    const timeSinceLast = now - this.lastUpdateTime;
 
-    const activity = buildActivity(
-      config,
-      this.connectedAt,
-      this.startedAt,
-      activeLarge,
-      activeSmall
-    );
+    if (this.isUpdating) {
+      this.pendingUpdate = config;
+      return this.status();
+    }
+
+    if (timeSinceLast < 1200) {
+      if (!this.pendingUpdate) {
+        this.pendingUpdate = config;
+        setTimeout(() => {
+          if (this.pendingUpdate && this.client) {
+            const next = this.pendingUpdate;
+            this.pendingUpdate = null;
+            this.update(next).catch(() => {});
+          }
+        }, 1200 - timeSinceLast);
+      }
+      return this.status();
+    }
+
+    this.isUpdating = true;
+    this.lastUpdateTime = now;
 
     try {
+      const activeLarge =
+        this.isAnimationRunning && this.largeFrames.length >= 2
+          ? this.largeFrames[this.largeIndex % this.largeFrames.length]
+          : undefined;
+      const activeSmall =
+        this.isAnimationRunning && this.smallFrames.length >= 2
+          ? this.smallFrames[this.smallIndex % this.smallFrames.length]
+          : undefined;
+
+      const activity = buildActivity(
+        config,
+        this.connectedAt,
+        this.startedAt,
+        activeLarge,
+        activeSmall
+      );
+
       await Promise.race([
         this.client.user.setActivity(activity),
         new Promise((_, reject) => setTimeout(() => reject(new Error("Discord setActivity timeout")), 4000))
@@ -167,8 +207,8 @@ export class DiscordBridge {
       this.updatedAt = new Date().toISOString();
       this.lastError = null;
 
-      // Keep animation loop ticking
-      if (this.hasAnimation() && !this.animationTimeout && !this.isTicking) {
+      // Keep animation loop ticking if animation is explicitly active
+      if (this.isAnimationRunning && this.hasAnimation() && !this.animationTimeout && !this.isTicking) {
         this.restartAnimationLoop();
       }
 
@@ -187,7 +227,7 @@ export class DiscordBridge {
       );
       if (hasPlaceholders && !this.healthRefreshInterval) {
         this.healthRefreshInterval = setInterval(() => {
-          if (this.client && this.config && !this.hasAnimation()) {
+          if (this.client && this.config && !this.isAnimationRunning) {
             this.update(this.config).catch(() => {});
           }
         }, 15000);
@@ -198,40 +238,24 @@ export class DiscordBridge {
 
       return this.status();
     } catch (error) {
-      // Fallback: retry with standard core RPC payload (stripping non-standard URLs)
-      try {
-        const coreActivity: SetActivity = {
-          type: activity.type,
-          name: activity.name,
-          details: activity.details,
-          state: activity.state,
-          largeImageKey: activity.largeImageKey,
-          largeImageText: activity.largeImageText,
-          smallImageKey: activity.smallImageKey,
-          smallImageText: activity.smallImageText,
-          buttons: activity.buttons,
-          startTimestamp: activity.startTimestamp,
-          endTimestamp: activity.endTimestamp,
-          partyId: activity.partyId,
-          partySize: activity.partySize,
-          partyMax: activity.partyMax,
-          instance: false
-        };
-        await Promise.race([
-          this.client.user.setActivity(compact(coreActivity)),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("Discord setActivity timeout")), 4000))
-        ]);
-        this.updatedAt = new Date().toISOString();
-        this.lastError = null;
-        return this.status();
-      } catch (fallbackError) {
-        this.lastError = fallbackError instanceof Error ? fallbackError.message : "Discord rejected the presence.";
-        throw new Error(this.lastError);
+      // Non-fatal or transient error - do not crash or loop
+      const msg = error instanceof Error ? error.message : "Discord rejected the presence.";
+      this.lastError = msg;
+      return this.status();
+    } finally {
+      this.isUpdating = false;
+      if (this.pendingUpdate && this.client) {
+        const next = this.pendingUpdate;
+        this.pendingUpdate = null;
+        setTimeout(() => {
+          this.update(next).catch(() => {});
+        }, 1200);
       }
     }
   }
 
   async disconnect(): Promise<BridgeStatus> {
+    this.isAnimationRunning = false;
     this.stopAnimationLoop();
     if (this.healthRefreshInterval) {
       clearInterval(this.healthRefreshInterval);
@@ -254,7 +278,7 @@ export class DiscordBridge {
 
   private restartAnimationLoop(): void {
     this.stopAnimationLoop();
-    if (!this.hasAnimation() || !this.client || !this.client.user || !this.config) return;
+    if (!this.isAnimationRunning || !this.hasAnimation() || !this.client || !this.client.user || !this.config) return;
 
     this.scheduleNextTick(0);
   }
@@ -278,7 +302,7 @@ export class DiscordBridge {
   }
 
   private async tickAnimation(): Promise<void> {
-    if (!this.client || !this.client.user || !this.config || !this.hasAnimation() || this.isTicking) {
+    if (!this.client || !this.client.user || !this.config || !this.isAnimationRunning || !this.hasAnimation() || this.isTicking) {
       return;
     }
 
@@ -306,18 +330,18 @@ export class DiscordBridge {
 
       await Promise.race([
         this.client.user.setActivity(activity),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("RPC setActivity timeout")), 3000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error("RPC setActivity timeout")), 4000))
       ]);
 
       this.updatedAt = new Date().toISOString();
       this.lastError = null;
-    } catch (err) {
-      // Non-fatal transient RPC error (e.g. rate limit debounce)
-      console.warn("Animation tick warning:", err instanceof Error ? (err.message || err.name) : err);
+    } catch {
+      // Suppress transient rate-limit / timeout noise in terminal
     } finally {
       this.isTicking = false;
-      if (this.client && this.config && this.hasAnimation()) {
-        this.scheduleNextTick(this.animationIntervalMs);
+      if (this.client && this.config && this.isAnimationRunning && this.hasAnimation()) {
+        const safeInterval = Math.max(this.animationIntervalMs, 5000);
+        this.scheduleNextTick(safeInterval);
       }
     }
   }
@@ -413,10 +437,8 @@ function buildActivity(
     stateUrl: config.stateUrl || undefined,
     largeImageKey: largeKey,
     largeImageText: config.largeText ? interpolatePlaceholders(config.largeText, barStyle) : undefined,
-    largeImageUrl: config.largeUrl || undefined,
     smallImageKey: smallKey,
     smallImageText: config.smallText ? interpolatePlaceholders(config.smallText, barStyle) : undefined,
-    smallImageUrl: config.smallUrl || undefined,
     buttons: buildButtons(config),
     statusDisplayType: (config.display as StatusDisplayType) ?? undefined,
     instance: false

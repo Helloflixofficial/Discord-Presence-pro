@@ -330,23 +330,8 @@ function bindActions(): void {
   // Interval change listener
   const intervalInput = must<HTMLInputElement>("anim-interval");
   const onIntervalChange = () => {
-    const intervalMs = getIntervalMs();
     if (largeFrames.length >= 2 || smallFrames.length >= 2) {
       startAnimPreview();
-      if (largeFrames.length >= 2) {
-        void fetch("/api/animation/start", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ target: "large", urls: largeFrames.map((f) => f.url), intervalMs })
-        });
-      }
-      if (smallFrames.length >= 2) {
-        void fetch("/api/animation/start", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ target: "small", urls: smallFrames.map((f) => f.url), intervalMs })
-        });
-      }
     }
   };
   intervalInput.addEventListener("change", onIntervalChange);
@@ -355,7 +340,7 @@ function bindActions(): void {
 
 function getIntervalMs(): number {
   const input = document.getElementById("anim-interval") as HTMLInputElement | null;
-  return Number(input?.value) || 50;
+  return Number(input?.value) || 5000;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -428,16 +413,10 @@ async function uploadImageFiles(files: File[]): Promise<void> {
     updateTabCounts();
     renderFrameGrid();
 
-    // Auto-sync with bridge if >= 2 frames
+    // Update preview in UI
     const targetFrames = getActiveFrames();
     if (targetFrames.length >= 2) {
       startOrUpdatePreviews();
-      const intervalMs = getIntervalMs();
-      void fetch("/api/animation/start", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: activeTarget, urls: targetFrames.map((f) => f.url), intervalMs })
-      });
     }
 
     showNotice(`${inserted.length} frame(s) uploaded for ${activeTarget} image successfully.`, "success");
@@ -473,12 +452,6 @@ async function uploadZip(file: File): Promise<void> {
     const targetFrames = getActiveFrames();
     if (targetFrames.length >= 2) {
       startOrUpdatePreviews();
-      const intervalMs = getIntervalMs();
-      void fetch("/api/animation/start", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: activeTarget, urls: targetFrames.map((f) => f.url), intervalMs })
-      });
     }
 
     showNotice(`${data.count ?? inserted.length} frame(s) imported from ZIP for ${activeTarget} image.`, "success");
@@ -549,19 +522,20 @@ async function startAnimation(): Promise<void> {
     showNotice(`Add at least 2 frames to start animation for ${activeTarget} image.`, "error");
     return;
   }
-  const intervalMs = getIntervalMs();
+  const rawInterval = getIntervalMs();
+  const safeInterval = Math.max(rawInterval, 5000);
   const urls = current.map((f) => f.url);
 
   try {
     const res = await fetch("/api/animation/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ target: activeTarget, urls, intervalMs })
+      body: JSON.stringify({ target: activeTarget, urls, intervalMs: safeInterval })
     });
     const data = await res.json() as { ok?: boolean; error?: string };
     if (!res.ok || data.error) throw new Error(data.error ?? "Failed to start animation.");
     startOrUpdatePreviews();
-    showNotice(`${activeTarget.toUpperCase()} animation started — ${current.length} frames cycling at ${intervalMs}ms.`, "success");
+    showNotice(`${activeTarget.toUpperCase()} slideshow active — cycling every ${safeInterval / 1000}s (Discord rate limit compliant).`, "success");
   } catch (err) {
     showNotice(err instanceof Error ? err.message : "Could not start animation.", "error");
   }
@@ -1330,22 +1304,7 @@ async function postPresence(action: "connect" | "update", silent = false): Promi
       );
     }
 
-    // If frames exist, ensure the animation cycling is active on Discord & in preview
-    const intervalMs = getIntervalMs();
-    if (largeFrames.length >= 2) {
-      void fetch("/api/animation/start", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: "large", urls: largeFrames.map((f) => f.url), intervalMs })
-      });
-    }
-    if (smallFrames.length >= 2) {
-      void fetch("/api/animation/start", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target: "small", urls: smallFrames.map((f) => f.url), intervalMs })
-      });
-    }
+    // Update preview in UI
     startOrUpdatePreviews();
 
     await refreshStatus();
