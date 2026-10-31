@@ -255,19 +255,15 @@
                     <span id="frame-count" class="anim-stat-value">0</span>
                   </div>
                   <label class="anim-stat">
-                    <span class="anim-stat-label">Slideshow Interval (ms)</span>
-                    <input id="anim-interval" class="anim-interval-input" type="number" min="4000" max="60000" step="1000" value="5000" title="Discord RPC rate limit requires at least 4000ms between updates" />
+                    <span class="anim-stat-label">Interval (ms)</span>
+                    <input id="anim-interval" class="anim-interval-input" type="number" min="50" max="10000" step="50" value="250" title="Animation speed in milliseconds" />
                   </label>
-                </div>
-
-                <div style="background: rgba(30, 41, 59, 0.6); border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; font-size: 12px; line-height: 1.5; color: #94a3b8;">
-                  <strong style="color: #38bdf8;">💡 Pro Tip for Smooth 60 FPS GIFs:</strong> Discord RPC has a strict 4-second rate limit for switching images. If you want a smooth, fast animated GIF, do not split it into frames — simply paste the direct <code>.gif</code> URL into <strong>Large Image Key</strong> in Tab 02 (Artwork)! Discord will play it natively at full speed with 0 lag.
                 </div>
 
                 <!-- Frame actions -->
                 <div class="anim-actions">
-                  <button id="anim-play-btn" class="button button-primary" type="button" disabled>▶ Start Slideshow</button>
-                  <button id="anim-stop-btn" class="button button-ghost" type="button" disabled>■ Stop</button>
+                  <button id="anim-play-btn" class="button button-primary" type="button" disabled>▶ Start Animation</button>
+                  <button id="anim-stop-btn" class="button button-ghost" type="button" disabled>■ Stop Animation</button>
                   <button id="anim-clear-btn" class="button button-danger-ghost" type="button">✕ Clear all</button>
                 </div>
 

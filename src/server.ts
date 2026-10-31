@@ -100,7 +100,7 @@ app.post("/api/animation/start", async (request, response) => {
       return;
     }
     const frameTarget = target === "small" ? "small" : "large";
-    bridge.setAnimationFrames(frameTarget, urls, intervalMs ?? 5000);
+    bridge.setAnimationFrames(frameTarget, urls, intervalMs ?? 250);
     response.json({ ok: true, frameCount: urls.length, target: frameTarget });
   } catch (err) {
     response.status(500).json({ error: String(err) });

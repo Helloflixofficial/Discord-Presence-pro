@@ -24,9 +24,9 @@ export class DiscordBridge {
   private smallFrames: string[] = [];
   private largeIndex = 0;
   private smallIndex = 0;
-  private animationIntervalMs = 5000;
+  private animationIntervalMs = 250;
   private animationTimeout: NodeJS.Timeout | null = null;
-  private isAnimationRunning = false;
+  private isAnimationRunning = true;
   private healthRefreshInterval: NodeJS.Timeout | null = null;
   private isTicking = false;
 
@@ -48,24 +48,24 @@ export class DiscordBridge {
     return this.largeFrames.length >= 2 || this.smallFrames.length >= 2;
   }
 
-  /** Set the frame URLs for animation cycling. Clamped to safe 4s+ interval for Discord RPC. */
+  /** Set the frame URLs for animation cycling. */
   setAnimationFrames(
     targetOrUrls: "large" | "small" | string[],
     urlsOrInterval?: string[] | number,
-    maybeInterval = 5000
+    maybeInterval = 250
   ): void {
     let target: "large" | "small" = "large";
     let urls: string[] = [];
-    let interval = 5000;
+    let interval = 250;
 
     if (targetOrUrls === "large" || targetOrUrls === "small") {
       target = targetOrUrls;
       urls = Array.isArray(urlsOrInterval) ? urlsOrInterval : [];
-      interval = typeof maybeInterval === "number" ? maybeInterval : 5000;
+      interval = typeof maybeInterval === "number" ? maybeInterval : 250;
     } else if (Array.isArray(targetOrUrls)) {
       target = "large";
       urls = targetOrUrls;
-      interval = typeof urlsOrInterval === "number" ? urlsOrInterval : 5000;
+      interval = typeof urlsOrInterval === "number" ? urlsOrInterval : 250;
     }
 
     const formatted = urls.map(formatImageUrl);
@@ -76,8 +76,7 @@ export class DiscordBridge {
       this.largeFrames = formatted;
       this.largeIndex = 0;
     }
-    // Discord RPC strictly limits presence updates. Clamp interval to min 4000ms.
-    this.animationIntervalMs = Math.max(interval, 4000);
+    this.animationIntervalMs = Math.max(interval, 100);
 
     if (urls.length >= 2) {
       this.isAnimationRunning = true;
@@ -96,7 +95,7 @@ export class DiscordBridge {
     this.stopAnimationLoop();
   }
 
-  /** Sync frames list from Postgres database for both targets without starting loop. */
+  /** Sync frames list from Postgres database for both targets and auto-arm animation if frames exist. */
   async syncFramesFromDb(intervalMs?: number): Promise<void> {
     try {
       const [largeDb, smallDb] = await Promise.all([
@@ -108,7 +107,13 @@ export class DiscordBridge {
       this.largeIndex = 0;
       this.smallIndex = 0;
       if (intervalMs) {
-        this.animationIntervalMs = Math.max(intervalMs, 4000);
+        this.animationIntervalMs = Math.max(intervalMs, 100);
+      }
+      if (this.largeFrames.length >= 2 || this.smallFrames.length >= 2) {
+        this.isAnimationRunning = true;
+      }
+      if (this.client && this.config && this.isAnimationRunning) {
+        this.restartAnimationLoop();
       }
     } catch (err) {
       console.warn("Could not sync frames from DB:", err instanceof Error ? err.message : err);
@@ -128,12 +133,18 @@ export class DiscordBridge {
       this.connectedAt = Date.now();
       this.lastError = null;
 
-      // Sync frames from DB if not loaded yet
-      if (this.largeFrames.length === 0 && this.smallFrames.length === 0) {
-        await this.syncFramesFromDb();
+      // Always sync animation frames from DB so we have active frames on startup
+      await this.syncFramesFromDb();
+
+      // Send initial activity with frame 0 active (never blank or default image)
+      await this.update(config);
+
+      // Start animation loop on connect
+      if (this.hasAnimation()) {
+        this.isAnimationRunning = true;
+        this.restartAnimationLoop();
       }
 
-      await this.update(config);
       return this.status();
     } catch (error) {
       try {
@@ -184,13 +195,13 @@ export class DiscordBridge {
 
     try {
       const activeLarge =
-        this.isAnimationRunning && this.largeFrames.length >= 2
+        this.largeFrames.length >= 2
           ? this.largeFrames[this.largeIndex % this.largeFrames.length]
-          : undefined;
+          : (config.largeKey ? formatImageUrl(config.largeKey) : undefined);
       const activeSmall =
-        this.isAnimationRunning && this.smallFrames.length >= 2
+        this.smallFrames.length >= 2
           ? this.smallFrames[this.smallIndex % this.smallFrames.length]
-          : undefined;
+          : (config.smallKey ? formatImageUrl(config.smallKey) : undefined);
 
       const activity = buildActivity(
         config,
@@ -340,7 +351,7 @@ export class DiscordBridge {
     } finally {
       this.isTicking = false;
       if (this.client && this.config && this.isAnimationRunning && this.hasAnimation()) {
-        const safeInterval = Math.max(this.animationIntervalMs, 5000);
+        const safeInterval = Math.max(this.animationIntervalMs, 100);
         this.scheduleNextTick(safeInterval);
       }
     }

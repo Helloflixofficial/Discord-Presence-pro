@@ -307,7 +307,7 @@ function bindActions() {
 }
 function getIntervalMs() {
     const input = document.getElementById("anim-interval");
-    return Number(input?.value) || 5000;
+    return Number(input?.value) || 250;
 }
 /* ═══════════════════════════════════════════════════════════════════════════
    LOAD FRAMES FROM SERVER
@@ -486,20 +486,19 @@ async function startAnimation() {
         showNotice(`Add at least 2 frames to start animation for ${activeTarget} image.`, "error");
         return;
     }
-    const rawInterval = getIntervalMs();
-    const safeInterval = Math.max(rawInterval, 5000);
+    const intervalMs = getIntervalMs();
     const urls = current.map((f) => f.url);
     try {
         const res = await fetch("/api/animation/start", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ target: activeTarget, urls, intervalMs: safeInterval })
+            body: JSON.stringify({ target: activeTarget, urls, intervalMs })
         });
         const data = await res.json();
         if (!res.ok || data.error)
             throw new Error(data.error ?? "Failed to start animation.");
         startOrUpdatePreviews();
-        showNotice(`${activeTarget.toUpperCase()} slideshow active — cycling every ${safeInterval / 1000}s (Discord rate limit compliant).`, "success");
+        showNotice(`${activeTarget.toUpperCase()} animation started — ${current.length} frames cycling at ${intervalMs}ms.`, "success");
     }
     catch (err) {
         showNotice(err instanceof Error ? err.message : "Could not start animation.", "error");
