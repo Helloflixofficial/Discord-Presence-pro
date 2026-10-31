@@ -2,6 +2,7 @@ import { Client } from "@xhayper/discord-rpc";
 import type { SetActivity, StatusDisplayType } from "@xhayper/discord-rpc";
 import type { BridgeStatus, PresenceConfig } from "./types.js";
 import { getFrames } from "./db.js";
+import { interpolatePlaceholders } from "./systemHealth.js";
 
 const activityTypeNames: Record<number, string> = {
   0: "Playing",
@@ -19,10 +20,13 @@ export class DiscordBridge {
   private lastError: string | null = null;
 
   /** Animation cycling state */
-  private animationFrames: string[] = [];
-  private animationIndex = 0;
-  private animationIntervalMs = 200;
+  private largeFrames: string[] = [];
+  private smallFrames: string[] = [];
+  private largeIndex = 0;
+  private smallIndex = 0;
+  private animationIntervalMs = 50;
   private animationTimeout: NodeJS.Timeout | null = null;
+  private healthRefreshInterval: NodeJS.Timeout | null = null;
   private isTicking = false;
 
   status(): BridgeStatus {
@@ -34,27 +38,61 @@ export class DiscordBridge {
     };
   }
 
-  /** Set the frame URLs for animation cycling. Pass [] to disable. */
-  setAnimationFrames(urls: string[], intervalMs = 200): void {
-    this.animationFrames = urls.map(formatImageUrl);
-    this.animationIntervalMs = Math.max(intervalMs, 50);
-    this.animationIndex = 0;
+  private hasAnimation(): boolean {
+    return this.largeFrames.length >= 2 || this.smallFrames.length >= 2;
+  }
+
+  /** Set the frame URLs for animation cycling. */
+  setAnimationFrames(
+    targetOrUrls: "large" | "small" | string[],
+    urlsOrInterval?: string[] | number,
+    maybeInterval = 50
+  ): void {
+    let target: "large" | "small" = "large";
+    let urls: string[] = [];
+    let interval = 50;
+
+    if (targetOrUrls === "large" || targetOrUrls === "small") {
+      target = targetOrUrls;
+      urls = Array.isArray(urlsOrInterval) ? urlsOrInterval : [];
+      interval = typeof maybeInterval === "number" ? maybeInterval : 50;
+    } else if (Array.isArray(targetOrUrls)) {
+      target = "large";
+      urls = targetOrUrls;
+      interval = typeof urlsOrInterval === "number" ? urlsOrInterval : 50;
+    }
+
+    const formatted = urls.map(formatImageUrl);
+    if (target === "small") {
+      this.smallFrames = formatted;
+      this.smallIndex = 0;
+    } else {
+      this.largeFrames = formatted;
+      this.largeIndex = 0;
+    }
+    this.animationIntervalMs = Math.max(interval, 50);
+
     if (this.client && this.config) {
       this.restartAnimationLoop();
     }
   }
 
-  /** Sync frames list from Postgres database. */
+  /** Sync frames list from Postgres database for both targets. */
   async syncFramesFromDb(intervalMs?: number): Promise<void> {
     try {
-      const dbFrames = await getFrames();
-      if (dbFrames.length >= 2) {
-        this.setAnimationFrames(
-          dbFrames.map((f) => f.url),
-          intervalMs ?? this.animationIntervalMs
-        );
-      } else {
-        this.setAnimationFrames([]);
+      const [largeDb, smallDb] = await Promise.all([
+        getFrames("large"),
+        getFrames("small")
+      ]);
+      this.largeFrames = largeDb.length >= 2 ? largeDb.map((f) => formatImageUrl(f.url)) : [];
+      this.smallFrames = smallDb.length >= 2 ? smallDb.map((f) => formatImageUrl(f.url)) : [];
+      this.largeIndex = 0;
+      this.smallIndex = 0;
+      if (intervalMs) {
+        this.animationIntervalMs = Math.max(intervalMs, 50);
+      }
+      if (this.client && this.config) {
+        this.restartAnimationLoop();
       }
     } catch (err) {
       console.warn("Could not sync frames from DB:", err instanceof Error ? err.message : err);
@@ -75,7 +113,7 @@ export class DiscordBridge {
       this.lastError = null;
 
       // Auto-load animation frames from DB if not already set in memory
-      if (this.animationFrames.length < 2) {
+      if (!this.hasAnimation()) {
         await this.syncFramesFromDb();
       }
 
@@ -103,13 +141,23 @@ export class DiscordBridge {
 
     this.config = config;
 
-    // If animation frames are available, keep the active frame so we don't flash back to static
-    const activeFrame =
-      this.animationFrames.length >= 2
-        ? this.animationFrames[this.animationIndex % this.animationFrames.length]
+    // Active frames so we don't flash back to static
+    const activeLarge =
+      this.largeFrames.length >= 2
+        ? this.largeFrames[this.largeIndex % this.largeFrames.length]
+        : undefined;
+    const activeSmall =
+      this.smallFrames.length >= 2
+        ? this.smallFrames[this.smallIndex % this.smallFrames.length]
         : undefined;
 
-    const activity = buildActivity(config, this.connectedAt, this.startedAt, activeFrame);
+    const activity = buildActivity(
+      config,
+      this.connectedAt,
+      this.startedAt,
+      activeLarge,
+      activeSmall
+    );
 
     try {
       await Promise.race([
@@ -120,19 +168,75 @@ export class DiscordBridge {
       this.lastError = null;
 
       // Keep animation loop ticking
-      if (this.animationFrames.length >= 2 && !this.animationTimeout && !this.isTicking) {
+      if (this.hasAnimation() && !this.animationTimeout && !this.isTicking) {
         this.restartAnimationLoop();
+      }
+
+      // Auto-refresh dynamic server health placeholders or active system stats every 15s
+      const hasPlaceholders = Boolean(
+        config.line1Mode === "cpu" ||
+        config.line1Mode === "gpu" ||
+        config.line1Mode === "ram" ||
+        config.line2Mode === "cpu" ||
+        config.line2Mode === "gpu" ||
+        config.line2Mode === "ram" ||
+        config.details?.includes("{") ||
+        config.state?.includes("{") ||
+        config.largeText?.includes("{") ||
+        config.smallText?.includes("{")
+      );
+      if (hasPlaceholders && !this.healthRefreshInterval) {
+        this.healthRefreshInterval = setInterval(() => {
+          if (this.client && this.config && !this.hasAnimation()) {
+            this.update(this.config).catch(() => {});
+          }
+        }, 15000);
+      } else if (!hasPlaceholders && this.healthRefreshInterval) {
+        clearInterval(this.healthRefreshInterval);
+        this.healthRefreshInterval = null;
       }
 
       return this.status();
     } catch (error) {
-      this.lastError = error instanceof Error ? error.message : "Discord rejected the presence.";
-      throw new Error(this.lastError);
+      // Fallback: retry with standard core RPC payload (stripping non-standard URLs)
+      try {
+        const coreActivity: SetActivity = {
+          type: activity.type,
+          name: activity.name,
+          details: activity.details,
+          state: activity.state,
+          largeImageKey: activity.largeImageKey,
+          largeImageText: activity.largeImageText,
+          smallImageKey: activity.smallImageKey,
+          smallImageText: activity.smallImageText,
+          buttons: activity.buttons,
+          startTimestamp: activity.startTimestamp,
+          endTimestamp: activity.endTimestamp,
+          partyId: activity.partyId,
+          partySize: activity.partySize,
+          partyMax: activity.partyMax,
+          instance: false
+        };
+        await Promise.race([
+          this.client.user.setActivity(compact(coreActivity)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Discord setActivity timeout")), 4000))
+        ]);
+        this.updatedAt = new Date().toISOString();
+        this.lastError = null;
+        return this.status();
+      } catch (fallbackError) {
+        this.lastError = fallbackError instanceof Error ? fallbackError.message : "Discord rejected the presence.";
+        throw new Error(this.lastError);
+      }
     }
   }
 
   async disconnect(): Promise<BridgeStatus> {
     this.stopAnimationLoop();
+    if (this.healthRefreshInterval) {
+      clearInterval(this.healthRefreshInterval);
+      this.healthRefreshInterval = null;
+    }
     if (this.client) {
       try {
         this.client.destroy();
@@ -150,7 +254,7 @@ export class DiscordBridge {
 
   private restartAnimationLoop(): void {
     this.stopAnimationLoop();
-    if (this.animationFrames.length < 2 || !this.client || !this.client.user || !this.config) return;
+    if (!this.hasAnimation() || !this.client || !this.client.user || !this.config) return;
 
     this.scheduleNextTick(0);
   }
@@ -174,16 +278,31 @@ export class DiscordBridge {
   }
 
   private async tickAnimation(): Promise<void> {
-    if (!this.client || !this.client.user || !this.config || this.animationFrames.length < 2 || this.isTicking) {
+    if (!this.client || !this.client.user || !this.config || !this.hasAnimation() || this.isTicking) {
       return;
     }
 
     this.isTicking = true;
     try {
-      this.animationIndex = (this.animationIndex + 1) % this.animationFrames.length;
-      const frameUrl = this.animationFrames[this.animationIndex];
+      let nextLarge: string | undefined = undefined;
+      if (this.largeFrames.length >= 2) {
+        this.largeIndex = (this.largeIndex + 1) % this.largeFrames.length;
+        nextLarge = this.largeFrames[this.largeIndex];
+      }
 
-      const activity = buildActivity(this.config, this.connectedAt, this.startedAt, frameUrl);
+      let nextSmall: string | undefined = undefined;
+      if (this.smallFrames.length >= 2) {
+        this.smallIndex = (this.smallIndex + 1) % this.smallFrames.length;
+        nextSmall = this.smallFrames[this.smallIndex];
+      }
+
+      const activity = buildActivity(
+        this.config,
+        this.connectedAt,
+        this.startedAt,
+        nextLarge,
+        nextSmall
+      );
 
       await Promise.race([
         this.client.user.setActivity(activity),
@@ -194,10 +313,10 @@ export class DiscordBridge {
       this.lastError = null;
     } catch (err) {
       // Non-fatal transient RPC error (e.g. rate limit debounce)
-      console.warn("Animation tick warning:", err instanceof Error ? err.message : err);
+      console.warn("Animation tick warning:", err instanceof Error ? (err.message || err.name) : err);
     } finally {
       this.isTicking = false;
-      if (this.client && this.config && this.animationFrames.length >= 2) {
+      if (this.client && this.config && this.hasAnimation()) {
         this.scheduleNextTick(this.animationIntervalMs);
       }
     }
@@ -231,23 +350,72 @@ function buildActivity(
   config: PresenceConfig,
   connectedAt: number,
   startedAt: number,
-  overrideLargeImage?: string
+  overrideLargeImage?: string,
+  overrideSmallImage?: string
 ): SetActivity {
-  const largeKey = overrideLargeImage || (config.largeKey ? formatImageUrl(config.largeKey) : undefined);
-  const smallKey = config.smallKey ? formatImageUrl(config.smallKey) : undefined;
+  let largeKey = overrideLargeImage || (config.largeKey ? formatImageUrl(config.largeKey) : undefined);
+  let smallKey = overrideSmallImage || (config.smallKey ? formatImageUrl(config.smallKey) : undefined);
+
+  // If smallKey is present but largeKey is missing, Discord RPC hangs or rejects. Promote to largeKey.
+  if (!largeKey && smallKey) {
+    largeKey = smallKey;
+    smallKey = undefined;
+  }
+
+  let detailsText: string | undefined = undefined;
+  switch (config.line1Mode) {
+    case "cpu":
+      detailsText = "{cpu}";
+      break;
+    case "gpu":
+      detailsText = "{gpu}";
+      break;
+    case "ram":
+      detailsText = "{ram}";
+      break;
+    case "none":
+      detailsText = undefined;
+      break;
+    case "custom":
+    default:
+      detailsText = config.details || undefined;
+      break;
+  }
+
+  let stateText: string | undefined = undefined;
+  switch (config.line2Mode) {
+    case "ram":
+      stateText = "{ram}";
+      break;
+    case "cpu":
+      stateText = "{cpu}";
+      break;
+    case "gpu":
+      stateText = "{gpu}";
+      break;
+    case "none":
+      stateText = undefined;
+      break;
+    case "custom":
+    default:
+      stateText = config.state || undefined;
+      break;
+  }
+
+  const barStyle = config.loadingBarStyle || "capsule";
 
   const activity: SetActivity = {
     type: config.type,
     name: config.name || activityTypeNames[config.type] || "Custom Presence",
-    details: config.details || undefined,
-    state: config.state || undefined,
+    details: detailsText ? interpolatePlaceholders(detailsText, barStyle) : undefined,
+    state: stateText ? interpolatePlaceholders(stateText, barStyle) : undefined,
     detailsUrl: config.detailsUrl || undefined,
     stateUrl: config.stateUrl || undefined,
     largeImageKey: largeKey,
-    largeImageText: config.largeText || undefined,
+    largeImageText: config.largeText ? interpolatePlaceholders(config.largeText, barStyle) : undefined,
     largeImageUrl: config.largeUrl || undefined,
     smallImageKey: smallKey,
-    smallImageText: config.smallText || undefined,
+    smallImageText: config.smallText ? interpolatePlaceholders(config.smallText, barStyle) : undefined,
     smallImageUrl: config.smallUrl || undefined,
     buttons: buildButtons(config),
     statusDisplayType: (config.display as StatusDisplayType) ?? undefined,
@@ -270,11 +438,28 @@ function buildActivity(
 }
 
 function buildButtons(config: PresenceConfig): Array<{ label: string; url: string }> | undefined {
-  const buttons = [
-    { label: config.button1Text.trim(), url: normalizeUrl(config.button1Url) },
-    { label: config.button2Text.trim(), url: normalizeUrl(config.button2Url) }
-  ].filter((button) => button.label && button.url);
-  return buttons.length ? buttons.slice(0, 2) : undefined;
+  const result: Array<{ label: string; url: string }> = [];
+
+  const addButton = (text: string, rawUrl: string) => {
+    const label = (text || "").trim();
+    const url = (rawUrl || "").trim();
+    if (!label && !url) return;
+
+    const finalLabel = (label || "Open Link").slice(0, 32);
+    const normalized = normalizeUrl(url || "https://discord.com");
+
+    if (isHttpUrl(normalized)) {
+      result.push({
+        label: finalLabel,
+        url: normalized.slice(0, 512)
+      });
+    }
+  };
+
+  addButton(config.button1Text, config.button1Url);
+  addButton(config.button2Text, config.button2Url);
+
+  return result.length ? result.slice(0, 2) : undefined;
 }
 
 function buildTimestamps(
@@ -283,17 +468,61 @@ function buildTimestamps(
   startedAt: number
 ): { startTimestamp?: number; endTimestamp?: number } {
   const now = Date.now();
+  const offsetMs = Math.max(0, Number(config.timerOffsetMinutes) || 0) * 60 * 1000;
+
   switch (config.timestampMode) {
+    case "none":
+      return {};
+
     case "last-connection":
       return { startTimestamp: connectedAt };
+
     case "startup":
       return { startTimestamp: startedAt };
+
     case "presence-update":
       return { startTimestamp: now };
+
+    case "elapsed-offset":
+      // Counts UP from X minutes ago (e.g. 25:52 elapsed)
+      return { startTimestamp: now - (offsetMs || 25 * 60 * 1000) };
+
+    case "countdown":
+      // Counts DOWN towards X minutes remaining (e.g. 25:00 left)
+      return { endTimestamp: now + (offsetMs || 30 * 60 * 1000) };
+
+    case "country-timezone": {
+      // Calculate start of day in chosen timezone using 12-hour format so it displays e.g. 1:55 instead of 13:55
+      const tz = config.selectedTimezone || "UTC";
+      try {
+        const parts = new Intl.DateTimeFormat("en-US", {
+          timeZone: tz,
+          hour: "numeric",
+          minute: "numeric",
+          second: "numeric",
+          hour12: false
+        }).formatToParts(new Date());
+
+        const h = parseInt(parts.find(p => p.type === "hour")?.value || "0", 10);
+        const m = parseInt(parts.find(p => p.type === "minute")?.value || "0", 10);
+        const s = parseInt(parts.find(p => p.type === "second")?.value || "0", 10);
+
+        const hours12 = h % 12 || 12;
+        const elapsedSec = hours12 * 3600 + m * 60 + s;
+        return { startTimestamp: now - (elapsedSec * 1000) };
+      } catch {
+        return { startTimestamp: now };
+      }
+    }
+
     case "local-time": {
       const current = new Date();
-      return { startTimestamp: new Date(current.getFullYear(), current.getMonth(), current.getDate()).getTime() };
+      // 12-hour clock (e.g. 13:55 -> 1:55 elapsed so Discord displays 1:55:xx instead of 24h 13:55)
+      const hours12 = current.getHours() % 12 || 12;
+      const elapsedSec = hours12 * 3600 + current.getMinutes() * 60 + current.getSeconds();
+      return { startTimestamp: now - (elapsedSec * 1000) };
     }
+
     case "custom": {
       const start = parseDate(config.customTimestampStart);
       if (!start) return {};
@@ -303,6 +532,9 @@ function buildTimestamps(
       }
       return start > now ? { startTimestamp: now, endTimestamp: start } : { startTimestamp: start };
     }
+
+    default:
+      return { startTimestamp: connectedAt };
   }
 }
 

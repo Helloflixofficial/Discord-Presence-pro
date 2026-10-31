@@ -3,9 +3,13 @@ export type DisplayType = 0 | 1 | 2;
 export type TimestampMode =
   | "last-connection"
   | "startup"
-  | "local-time"
   | "presence-update"
-  | "custom";
+  | "elapsed-offset"
+  | "countdown"
+  | "country-timezone"
+  | "local-time"
+  | "custom"
+  | "none";
 
 export interface PresenceConfig {
   applicationId: string;
@@ -22,6 +26,12 @@ export interface PresenceConfig {
   customTimestampStart: string;
   customTimestampEndEnabled: boolean;
   customTimestampEnd: string;
+  selectedTimezone?: string;
+  timerOffsetMinutes?: number;
+  activityServerHealth?: "none" | "details" | "state";
+  line1Mode?: "custom" | "cpu" | "gpu" | "ram" | "none";
+  line2Mode?: "custom" | "cpu" | "gpu" | "ram" | "none";
+  loadingBarStyle?: string;
   largeKey: string;
   largeText: string;
   largeUrl: string;
@@ -56,6 +66,12 @@ export const defaultPresence = (applicationId: string): PresenceConfig => ({
   customTimestampStart: new Date().toISOString().slice(0, 16),
   customTimestampEndEnabled: false,
   customTimestampEnd: new Date(Date.now() + 60 * 60 * 1000).toISOString().slice(0, 16),
+  selectedTimezone: "UTC",
+  timerOffsetMinutes: 0,
+  activityServerHealth: "none",
+  line1Mode: "cpu",
+  line2Mode: "ram",
+  loadingBarStyle: "capsule",
   largeKey: "",
   largeText: "",
   largeUrl: "",

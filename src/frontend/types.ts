@@ -1,6 +1,15 @@
 export type ActivityType = 0 | 2 | 3 | 5;
 export type DisplayType = 0 | 1 | 2;
-export type TimestampMode = "last-connection" | "startup" | "local-time" | "presence-update" | "custom";
+export type TimestampMode =
+  | "last-connection"
+  | "startup"
+  | "presence-update"
+  | "elapsed-offset"
+  | "countdown"
+  | "country-timezone"
+  | "local-time"
+  | "custom"
+  | "none";
 export type FrameTarget = "large" | "small";
 
 export interface AnimationFrame {
@@ -28,6 +37,12 @@ export interface PresenceConfig {
   customTimestampStart: string;
   customTimestampEndEnabled: boolean;
   customTimestampEnd: string;
+  selectedTimezone?: string;
+  timerOffsetMinutes?: number;
+  activityServerHealth?: "none" | "details" | "state";
+  line1Mode?: "custom" | "cpu" | "gpu" | "ram" | "none";
+  line2Mode?: "custom" | "cpu" | "gpu" | "ram" | "none";
+  loadingBarStyle?: string;
   largeKey: string;
   largeText: string;
   largeUrl: string;

@@ -9,12 +9,61 @@ const defaultNames = { 0: "Playing", 2: "Listening to", 3: "Watching", 5: "Compe
 let state;
 let serverDefault = null;
 /* Animation state (client-side) */
-let frames = [];
-let animationActive = false;
+let activeTarget = "large";
+let largeFrames = [];
+let smallFrames = [];
 let animPreviewTimer = null;
-let animPreviewIndex = 0;
+let animLargeIndex = 0;
+let animSmallIndex = 0;
 // Drag-and-drop reorder
 let dragSrcId = null;
+function getActiveFrames() {
+    return activeTarget === "small" ? smallFrames : largeFrames;
+}
+function setActiveFrames(items) {
+    if (activeTarget === "small") {
+        smallFrames = items;
+    }
+    else {
+        largeFrames = items;
+    }
+}
+function updateTabCounts() {
+    const largeEl = document.getElementById("large-tab-count");
+    if (largeEl)
+        largeEl.textContent = String(largeFrames.length);
+    const smallEl = document.getElementById("small-tab-count");
+    if (smallEl)
+        smallEl.textContent = String(smallFrames.length);
+    const currentCount = getActiveFrames().length;
+    must("frame-count").textContent = String(currentCount);
+}
+function switchTab(target) {
+    activeTarget = target;
+    const largeTab = must("tab-large-frames");
+    const smallTab = must("tab-small-frames");
+    const dropLabel = document.getElementById("drop-target-label");
+    if (target === "large") {
+        largeTab.classList.add("active");
+        largeTab.setAttribute("aria-selected", "true");
+        smallTab.classList.remove("active");
+        smallTab.setAttribute("aria-selected", "false");
+        if (dropLabel)
+            dropLabel.textContent = "PNG · JPG · WEBP · GIF · for LARGE IMAGE (up to 20 frames)";
+    }
+    else {
+        smallTab.classList.add("active");
+        smallTab.setAttribute("aria-selected", "true");
+        largeTab.classList.remove("active");
+        largeTab.setAttribute("aria-selected", "false");
+        if (dropLabel)
+            dropLabel.textContent = "PNG · JPG · WEBP · GIF · for SMALL IMAGE (up to 20 frames)";
+    }
+    updateTabCounts();
+    renderFrameGrid();
+    updateAnimControls();
+    updateAnimPreviewStrip();
+}
 /* ═══════════════════════════════════════════════════════════════════════════
    BOOTSTRAP
 ═══════════════════════════════════════════════════════════════════════════ */
@@ -34,15 +83,36 @@ async function bootstrap() {
     writeStateToForm();
     render();
     bindActions();
+    startLivePreviewClock();
+    startSystemHealthPolling();
     await refreshStatus();
     await loadFrames();
+    // Auto-connect to Discord on open, unless explicitly disconnected in this session
+    const manuallyDisconnected = sessionStorage.getItem("customrp-manual-disconnect") === "true";
+    if (!isBridgeConnected && !manuallyDisconnected && state.applicationId?.trim()) {
+        console.log("Auto-connecting to Discord on open...");
+        void postPresence("connect", true);
+    }
 }
 /* ═══════════════════════════════════════════════════════════════════════════
    PRESENCE FORM BINDINGS
 ═══════════════════════════════════════════════════════════════════════════ */
 function bindActions() {
-    must("connect").addEventListener("click", () => void postPresence("connect"));
-    must("quick-update").addEventListener("click", () => void postPresence("update"));
+    const triggerUpdate = () => {
+        sessionStorage.removeItem("customrp-manual-disconnect");
+        void postPresence("update");
+    };
+    must("connect").addEventListener("click", () => {
+        sessionStorage.removeItem("customrp-manual-disconnect");
+        void postPresence("connect");
+    });
+    must("quick-update").addEventListener("click", triggerUpdate);
+    const btnUpdate = document.getElementById("buttons-update-btn");
+    if (btnUpdate)
+        btnUpdate.addEventListener("click", triggerUpdate);
+    const topUpdate = document.getElementById("topbar-update");
+    if (topUpdate)
+        topUpdate.addEventListener("click", triggerUpdate);
     must("disconnect").addEventListener("click", () => void disconnect());
     must("export-preset").addEventListener("click", exportPreset);
     must("import-preset").addEventListener("click", () => must("preset-file").click());
@@ -50,6 +120,143 @@ function bindActions() {
     must("reset-form").addEventListener("click", resetEditor);
     must("assets-link").addEventListener("click", (e) => { if (!state.applicationId)
         e.preventDefault(); });
+    // ── Timer Presets (10m, 25m, 1h, 2h) ─────────────────────────────────
+    document.querySelectorAll(".timer-preset-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const mins = Number(btn.dataset.minutes) || 0;
+            state.timerOffsetMinutes = mins;
+            setField("timerOffsetMinutes", mins);
+            if (must("autosave").checked) {
+                persistStateDebounced();
+                pushToDiscordDebounced();
+            }
+            render();
+        });
+    });
+    // ── Category Tabs bindings ───────────────────────────────────────────
+    const categoryTabs = document.querySelectorAll(".nav-tab, .editor-tab");
+    categoryTabs.forEach((tab) => {
+        tab.addEventListener("click", () => {
+            const targetId = tab.dataset.tab;
+            if (!targetId)
+                return;
+            categoryTabs.forEach((t) => {
+                t.classList.remove("active");
+                t.setAttribute("aria-selected", "false");
+            });
+            tab.classList.add("active");
+            tab.setAttribute("aria-selected", "true");
+            document.querySelectorAll(".panel-section").forEach((panel) => {
+                panel.classList.toggle("active", panel.id === targetId);
+            });
+            try {
+                localStorage.setItem("customrp-active-tab", targetId);
+            }
+            catch { /* ignore */ }
+        });
+    });
+    // ── Server Health Topbar Pill & Actions ───────────────────────────────
+    const healthPill = document.getElementById("topbar-health-pill");
+    if (healthPill) {
+        healthPill.addEventListener("click", () => {
+            const healthTab = document.querySelector('.nav-tab[data-tab="tab-health"]');
+            if (healthTab)
+                healthTab.click();
+        });
+    }
+    const gotoHealth = document.getElementById("goto-health-tab");
+    if (gotoHealth) {
+        gotoHealth.addEventListener("click", () => {
+            const healthTab = document.querySelector('.nav-tab[data-tab="tab-health"]');
+            if (healthTab)
+                healthTab.click();
+        });
+    }
+    // Quick Chips under Details & State
+    document.querySelectorAll(".chip-btn").forEach((chip) => {
+        chip.addEventListener("click", () => {
+            const target = chip.dataset.insertTarget;
+            const val = chip.dataset.insertVal;
+            if (!target || !val)
+                return;
+            const current = String(state[target] || "");
+            const updated = current ? `${current} ${val}`.slice(0, 128) : val.slice(0, 128);
+            state[target] = updated;
+            setField(target, updated);
+            if (must("autosave").checked) {
+                persistStateDebounced();
+                pushToDiscordDebounced();
+            }
+            render();
+        });
+    });
+    // Tab 06 Server Health Buttons
+    const btnInsertDetails = document.getElementById("btn-insert-health-details");
+    if (btnInsertDetails) {
+        btnInsertDetails.addEventListener("click", () => {
+            state.line1Mode = "cpu";
+            setField("line1Mode", "cpu");
+            if (must("autosave").checked) {
+                persistStateDebounced();
+                pushToDiscordDebounced();
+            }
+            render();
+            showNotice("Set Line 1 to CPU Usage Bar!", "success");
+        });
+    }
+    const btnInsertState = document.getElementById("btn-insert-health-state");
+    if (btnInsertState) {
+        btnInsertState.addEventListener("click", () => {
+            state.line2Mode = "ram";
+            setField("line2Mode", "ram");
+            if (must("autosave").checked) {
+                persistStateDebounced();
+                pushToDiscordDebounced();
+            }
+            render();
+            showNotice("Set Line 2 to RAM Usage Bar!", "success");
+        });
+    }
+    const btnCopyHealth = document.getElementById("btn-copy-health-bar");
+    if (btnCopyHealth) {
+        btnCopyHealth.addEventListener("click", () => {
+            const barText = document.getElementById("health-hero-bar")?.textContent || "";
+            if (barText) {
+                void navigator.clipboard.writeText(barText).then(() => {
+                    showNotice("Copied Server Health Bar to clipboard!", "success");
+                }).catch(() => {
+                    showNotice("Failed to copy", "error");
+                });
+            }
+        });
+    }
+    const btnHealthRefresh = document.getElementById("health-refresh-btn");
+    if (btnHealthRefresh) {
+        btnHealthRefresh.addEventListener("click", () => void fetchSystemHealth());
+    }
+    // Restore active category tab if saved
+    try {
+        const savedTab = localStorage.getItem("customrp-active-tab");
+        if (savedTab) {
+            const targetBtn = document.querySelector(`.nav-tab[data-tab="${savedTab}"], .editor-tab[data-tab="${savedTab}"]`);
+            if (targetBtn)
+                targetBtn.click();
+        }
+    }
+    catch { /* ignore */ }
+    // Mobile preview toggle
+    const mobileToggle = document.getElementById("mobile-preview-toggle");
+    if (mobileToggle) {
+        mobileToggle.addEventListener("click", () => {
+            const preview = document.querySelector(".preview-pane");
+            if (preview) {
+                preview.scrollIntoView({ behavior: "smooth" });
+            }
+        });
+    }
+    // ── Animation Tabs bindings ──────────────────────────────────────────
+    must("tab-large-frames").addEventListener("click", () => switchTab("large"));
+    must("tab-small-frames").addEventListener("click", () => switchTab("small"));
     // ── Animation Frames bindings ──────────────────────────────────────────
     const dropZone = must("drop-zone");
     const fileInput = must("frame-file-input");
@@ -90,55 +297,73 @@ function bindActions() {
     must("anim-clear-btn").addEventListener("click", () => void clearAllFrames());
     // Interval change listener
     const intervalInput = must("anim-interval");
-    intervalInput.addEventListener("change", () => {
-        if (animationActive && frames.length >= 2) {
+    const onIntervalChange = () => {
+        const intervalMs = getIntervalMs();
+        if (largeFrames.length >= 2 || smallFrames.length >= 2) {
             startAnimPreview();
-            const intervalMs = Number(intervalInput.value) || 200;
-            void fetch("/api/animation/start", {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ urls: frames.map((f) => f.url), intervalMs })
-            });
+            if (largeFrames.length >= 2) {
+                void fetch("/api/animation/start", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ target: "large", urls: largeFrames.map((f) => f.url), intervalMs })
+                });
+            }
+            if (smallFrames.length >= 2) {
+                void fetch("/api/animation/start", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ target: "small", urls: smallFrames.map((f) => f.url), intervalMs })
+                });
+            }
         }
-    });
+    };
+    intervalInput.addEventListener("change", onIntervalChange);
+    intervalInput.addEventListener("input", onIntervalChange);
 }
 function getIntervalMs() {
     const input = document.getElementById("anim-interval");
-    return Number(input?.value) || 200;
+    return Number(input?.value) || 50;
 }
 /* ═══════════════════════════════════════════════════════════════════════════
    LOAD FRAMES FROM SERVER
 ═══════════════════════════════════════════════════════════════════════════ */
 async function loadFrames() {
     try {
-        const res = await fetch("/api/frames");
-        const data = await res.json();
-        frames = data.frames;
+        const [largeRes, smallRes] = await Promise.all([
+            fetch("/api/frames?target=large"),
+            fetch("/api/frames?target=small")
+        ]);
+        const largeData = (await largeRes.json());
+        const smallData = (await smallRes.json());
+        largeFrames = largeData.frames || [];
+        smallFrames = smallData.frames || [];
+        updateTabCounts();
         renderFrameGrid();
-        if (frames.length >= 2) {
-            animationActive = true;
-            updateAnimControls();
-            startAnimPreview();
-            const intervalMs = Number(document.getElementById("anim-interval").value) || 200;
-            void fetch("/api/animation/start", {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ urls: frames.map((f) => f.url), intervalMs })
-            });
-        }
+        startOrUpdatePreviews();
     }
     catch {
         showNotice("Could not load animation frames from server.", "error");
+    }
+}
+function startOrUpdatePreviews() {
+    updateAnimControls();
+    if (largeFrames.length >= 2 || smallFrames.length >= 2) {
+        startAnimPreview();
+    }
+    else {
+        stopAnimPreview();
+        updatePreview();
     }
 }
 /* ═══════════════════════════════════════════════════════════════════════════
    UPLOAD IMAGE FILES
 ═══════════════════════════════════════════════════════════════════════════ */
 async function uploadImageFiles(files) {
+    const current = getActiveFrames();
     const maxFrames = 20;
-    const available = maxFrames - frames.length;
+    const available = maxFrames - current.length;
     if (available <= 0) {
-        showNotice(`Maximum ${maxFrames} frames reached. Delete some before adding more.`, "error");
+        showNotice(`Maximum ${maxFrames} frames reached for ${activeTarget} image. Delete some before adding more.`, "error");
         return;
     }
     const toUpload = files.slice(0, available);
@@ -148,6 +373,7 @@ async function uploadImageFiles(files) {
     // Show skeleton cards
     const skeletonIds = toUpload.map(() => addSkeletonCard());
     const formData = new FormData();
+    formData.append("target", activeTarget);
     toUpload.forEach((f) => formData.append("files", f));
     try {
         const res = await fetch("/api/frames/upload", { method: "POST", body: formData });
@@ -156,21 +382,27 @@ async function uploadImageFiles(files) {
             throw new Error(data.error ?? "Upload failed.");
         // Remove skeletons and add real frames
         skeletonIds.forEach((id) => document.getElementById(id)?.remove());
-        frames.push(...(data.frames ?? []));
+        const inserted = data.frames ?? [];
+        if (activeTarget === "small") {
+            smallFrames.push(...inserted);
+        }
+        else {
+            largeFrames.push(...inserted);
+        }
+        updateTabCounts();
         renderFrameGrid();
-        // Auto-start animation if >= 2 frames
-        if (frames.length >= 2) {
-            animationActive = true;
-            updateAnimControls();
-            startAnimPreview();
+        // Auto-sync with bridge if >= 2 frames
+        const targetFrames = getActiveFrames();
+        if (targetFrames.length >= 2) {
+            startOrUpdatePreviews();
             const intervalMs = getIntervalMs();
             void fetch("/api/animation/start", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ urls: frames.map((f) => f.url), intervalMs })
+                body: JSON.stringify({ target: activeTarget, urls: targetFrames.map((f) => f.url), intervalMs })
             });
         }
-        showNotice(`${data.frames?.length ?? 0} frame(s) uploaded successfully.`, "success");
+        showNotice(`${inserted.length} frame(s) uploaded for ${activeTarget} image successfully.`, "success");
     }
     catch (err) {
         skeletonIds.forEach((id) => document.getElementById(id)?.remove());
@@ -182,29 +414,35 @@ async function uploadImageFiles(files) {
    UPLOAD ZIP
 ═══════════════════════════════════════════════════════════════════════════ */
 async function uploadZip(file) {
-    showNotice("Extracting ZIP and uploading frames…");
+    showNotice(`Extracting ZIP and uploading frames for ${activeTarget} image…`);
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("target", activeTarget);
     try {
         const res = await fetch("/api/frames/upload-zip", { method: "POST", body: formData });
         const data = await res.json();
         if (!res.ok || data.error)
             throw new Error(data.error ?? "ZIP upload failed.");
-        frames.push(...(data.frames ?? []));
+        const inserted = data.frames ?? [];
+        if (activeTarget === "small") {
+            smallFrames.push(...inserted);
+        }
+        else {
+            largeFrames.push(...inserted);
+        }
+        updateTabCounts();
         renderFrameGrid();
-        // Auto-start animation if >= 2 frames
-        if (frames.length >= 2) {
-            animationActive = true;
-            updateAnimControls();
-            startAnimPreview();
+        const targetFrames = getActiveFrames();
+        if (targetFrames.length >= 2) {
+            startOrUpdatePreviews();
             const intervalMs = getIntervalMs();
             void fetch("/api/animation/start", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ urls: frames.map((f) => f.url), intervalMs })
+                body: JSON.stringify({ target: activeTarget, urls: targetFrames.map((f) => f.url), intervalMs })
             });
         }
-        showNotice(`${data.count ?? data.frames?.length ?? 0} frame(s) imported from ZIP.`, "success");
+        showNotice(`${data.count ?? inserted.length} frame(s) imported from ZIP for ${activeTarget} image.`, "success");
     }
     catch (err) {
         showNotice(err instanceof Error ? err.message : "ZIP upload failed.", "error");
@@ -216,11 +454,23 @@ async function uploadZip(file) {
 async function deleteFrameById(id) {
     try {
         await fetch(`/api/frames/${id}`, { method: "DELETE" });
-        frames = frames.filter((f) => f.id !== id);
-        renderFrameGrid();
-        if (frames.length < 2 && animationActive) {
-            await stopAnimation();
+        if (activeTarget === "small") {
+            smallFrames = smallFrames.filter((f) => f.id !== id);
         }
+        else {
+            largeFrames = largeFrames.filter((f) => f.id !== id);
+        }
+        updateTabCounts();
+        renderFrameGrid();
+        const targetFrames = getActiveFrames();
+        if (targetFrames.length < 2) {
+            void fetch("/api/animation/stop", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ target: activeTarget })
+            });
+        }
+        startOrUpdatePreviews();
     }
     catch {
         showNotice("Could not delete frame.", "error");
@@ -230,14 +480,25 @@ async function deleteFrameById(id) {
    CLEAR ALL
 ═══════════════════════════════════════════════════════════════════════════ */
 async function clearAllFrames() {
-    if (!confirm("Delete all animation frames? This cannot be undone."))
+    if (!confirm(`Delete all animation frames for ${activeTarget} image? This cannot be undone.`))
         return;
-    await stopAnimation();
     try {
-        await fetch("/api/frames", { method: "DELETE" });
-        frames = [];
+        await fetch(`/api/frames?target=${activeTarget}`, { method: "DELETE" });
+        await fetch("/api/animation/stop", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ target: activeTarget })
+        });
+        if (activeTarget === "small") {
+            smallFrames = [];
+        }
+        else {
+            largeFrames = [];
+        }
+        updateTabCounts();
         renderFrameGrid();
-        showNotice("All frames cleared.", "success");
+        startOrUpdatePreviews();
+        showNotice(`All ${activeTarget} animation frames cleared.`, "success");
     }
     catch {
         showNotice("Could not clear frames.", "error");
@@ -247,42 +508,45 @@ async function clearAllFrames() {
    ANIMATION CONTROLS
 ═══════════════════════════════════════════════════════════════════════════ */
 async function startAnimation() {
-    if (frames.length < 2) {
-        showNotice("Add at least 2 frames to start an animation.", "error");
+    const current = getActiveFrames();
+    if (current.length < 2) {
+        showNotice(`Add at least 2 frames to start animation for ${activeTarget} image.`, "error");
         return;
     }
     const intervalMs = getIntervalMs();
-    const urls = frames.map((f) => f.url);
+    const urls = current.map((f) => f.url);
     try {
         const res = await fetch("/api/animation/start", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ urls, intervalMs })
+            body: JSON.stringify({ target: activeTarget, urls, intervalMs })
         });
         const data = await res.json();
         if (!res.ok || data.error)
             throw new Error(data.error ?? "Failed to start animation.");
-        animationActive = true;
-        updateAnimControls();
-        startAnimPreview();
-        showNotice(`Animation started — ${frames.length} frames cycling at ${intervalMs}ms.`, "success");
+        startOrUpdatePreviews();
+        showNotice(`${activeTarget.toUpperCase()} animation started — ${current.length} frames cycling at ${intervalMs}ms.`, "success");
     }
     catch (err) {
         showNotice(err instanceof Error ? err.message : "Could not start animation.", "error");
     }
 }
 async function stopAnimation() {
-    stopAnimPreview();
     try {
-        await fetch("/api/animation/stop", { method: "POST" });
+        await fetch("/api/animation/stop", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ target: activeTarget })
+        });
     }
     catch { /* best-effort */ }
-    animationActive = false;
+    showNotice(`${activeTarget.toUpperCase()} animation stopped.`, "success");
     updateAnimControls();
 }
 function updateAnimControls() {
-    must("anim-play-btn").disabled = animationActive || frames.length < 2;
-    must("anim-stop-btn").disabled = !animationActive;
+    const current = getActiveFrames();
+    must("anim-play-btn").disabled = current.length < 2;
+    must("anim-stop-btn").disabled = current.length < 2;
 }
 /* ═══════════════════════════════════════════════════════════════════════════
    LOCAL ANIMATION PREVIEW (in the Discord mock + strip)
@@ -290,13 +554,25 @@ function updateAnimControls() {
 function startAnimPreview() {
     stopAnimPreview();
     const intervalMs = getIntervalMs();
-    animPreviewIndex = 0;
+    animLargeIndex = 0;
+    animSmallIndex = 0;
+    updateAnimPreviewStrip();
+    animPreviewTimer = window.setInterval(() => {
+        tickAnimPreview();
+    }, intervalMs);
+    tickAnimPreview(); // immediate first tick
+}
+function updateAnimPreviewStrip() {
+    const activeFrames = getActiveFrames();
     const strip = must("anim-preview-strip");
+    if (activeFrames.length < 2) {
+        strip.classList.add("hidden");
+        return;
+    }
     strip.classList.remove("hidden");
-    // Build strip thumbnails
     const stripFrames = must("anim-strip-frames");
     stripFrames.innerHTML = "";
-    frames.forEach((f, i) => {
+    activeFrames.forEach((f, i) => {
         const div = document.createElement("div");
         div.className = "strip-frame";
         div.id = `strip-${i}`;
@@ -306,24 +582,42 @@ function startAnimPreview() {
         div.appendChild(img);
         stripFrames.appendChild(div);
     });
-    must("anim-strip-count").textContent = String(frames.length);
-    animPreviewTimer = window.setInterval(() => {
-        tickAnimPreview();
-    }, intervalMs);
-    tickAnimPreview(); // immediate first tick
+    must("anim-strip-count").textContent = String(activeFrames.length);
 }
 function tickAnimPreview() {
-    if (frames.length === 0)
-        return;
-    animPreviewIndex = (animPreviewIndex + 1) % frames.length;
-    const url = frames[animPreviewIndex].url;
-    // Update large art in preview
-    const art = must("large-art");
-    art.classList.add("has-image");
-    art.style.backgroundImage = `url("${CSS.escape(url)}")`;
-    // Highlight strip frame
-    document.querySelectorAll(".strip-frame").forEach((el) => el.classList.remove("active"));
-    document.getElementById(`strip-${animPreviewIndex}`)?.classList.add("active");
+    // Update large art if animating
+    if (largeFrames.length >= 2) {
+        animLargeIndex = (animLargeIndex + 1) % largeFrames.length;
+        const url = largeFrames[animLargeIndex].url;
+        const art = must("large-art");
+        art.classList.add("has-image");
+        art.style.backgroundImage = `url("${CSS.escape(url)}")`;
+    }
+    else if (!state?.largeKey) {
+        const art = must("large-art");
+        art.classList.remove("has-image");
+        art.style.backgroundImage = "";
+    }
+    // Update small art if animating
+    if (smallFrames.length >= 2) {
+        animSmallIndex = (animSmallIndex + 1) % smallFrames.length;
+        const url = smallFrames[animSmallIndex].url;
+        const art = must("small-art");
+        art.classList.add("has-image");
+        art.style.backgroundImage = `url("${CSS.escape(url)}")`;
+    }
+    else if (!state?.smallKey) {
+        const art = must("small-art");
+        art.classList.remove("has-image");
+        art.style.backgroundImage = "";
+    }
+    // Highlight strip frame for active target
+    const activeFrames = getActiveFrames();
+    if (activeFrames.length >= 2) {
+        const activeIdx = activeTarget === "large" ? animLargeIndex : animSmallIndex;
+        document.querySelectorAll(".strip-frame").forEach((el) => el.classList.remove("active"));
+        document.getElementById(`strip-${activeIdx}`)?.classList.add("active");
+    }
 }
 function stopAnimPreview() {
     if (animPreviewTimer !== null) {
@@ -337,7 +631,8 @@ function stopAnimPreview() {
 function renderFrameGrid() {
     const grid = must("frame-grid");
     grid.innerHTML = "";
-    frames.forEach((frame, index) => {
+    const current = getActiveFrames();
+    current.forEach((frame, index) => {
         const card = document.createElement("div");
         card.className = "frame-card";
         card.dataset.id = String(frame.id);
@@ -384,7 +679,7 @@ function renderFrameGrid() {
         grid.appendChild(card);
     });
     // Update count + button states
-    must("frame-count").textContent = String(frames.length);
+    must("frame-count").textContent = String(current.length);
     updateAnimControls();
 }
 function addSkeletonCard() {
@@ -403,25 +698,55 @@ function addSkeletonCard() {
    DRAG-AND-DROP REORDER
 ═══════════════════════════════════════════════════════════════════════════ */
 async function reorderByDrop(srcId, targetId) {
-    const srcIdx = frames.findIndex((f) => f.id === srcId);
-    const tgtIdx = frames.findIndex((f) => f.id === targetId);
+    const current = getActiveFrames();
+    const srcIdx = current.findIndex((f) => f.id === srcId);
+    const tgtIdx = current.findIndex((f) => f.id === targetId);
     if (srcIdx === -1 || tgtIdx === -1)
         return;
-    const reordered = [...frames];
+    const reordered = [...current];
     const [moved] = reordered.splice(srcIdx, 1);
     reordered.splice(tgtIdx, 0, moved);
-    frames = reordered;
+    setActiveFrames(reordered);
     renderFrameGrid();
     try {
         await fetch("/api/frames/reorder", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ orderedIds: frames.map((f) => f.id) })
+            body: JSON.stringify({ orderedIds: reordered.map((f) => f.id) })
         });
     }
     catch {
         showNotice("Could not save frame order.", "error");
     }
+}
+let saveTimer = null;
+function persistStateDebounced() {
+    if (saveTimer)
+        window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => {
+        persistState();
+    }, 200);
+}
+let renderPending = false;
+function scheduleRender() {
+    if (renderPending)
+        return;
+    renderPending = true;
+    window.requestAnimationFrame(() => {
+        renderPending = false;
+        render();
+    });
+}
+let isBridgeConnected = false;
+let discordPushTimer = null;
+function pushToDiscordDebounced() {
+    if (!isBridgeConnected || !state.applicationId.trim())
+        return;
+    if (discordPushTimer)
+        window.clearTimeout(discordPushTimer);
+    discordPushTimer = window.setTimeout(() => {
+        void postPresence("update", true);
+    }, 1000);
 }
 /* ═══════════════════════════════════════════════════════════════════════════
    PRESENCE FORM LOGIC
@@ -439,9 +764,11 @@ function handleFieldChange(event) {
         state.partyMax = state.partySize;
         setField("partyMax", state.partyMax);
     }
-    if (must("autosave").checked)
-        persistState();
-    render();
+    if (must("autosave").checked) {
+        persistStateDebounced();
+        pushToDiscordDebounced();
+    }
+    scheduleRender();
 }
 function render() {
     updateCounters();
@@ -460,8 +787,26 @@ function updateCounters() {
     }
 }
 function updateConditionalFields() {
-    must("custom-timestamps").classList.toggle("hidden", state.timestampMode !== "custom");
-    must("custom-end-field").classList.toggle("hidden", !state.customTimestampEndEnabled);
+    const mode = state.timestampMode;
+    const customEl = document.getElementById("custom-timestamps");
+    if (customEl)
+        customEl.classList.toggle("hidden", mode !== "custom");
+    const customEndField = document.getElementById("custom-end-field");
+    if (customEndField)
+        customEndField.classList.toggle("hidden", !state.customTimestampEndEnabled);
+    const offsetContainer = document.getElementById("timer-offset-container");
+    const offsetLabel = document.getElementById("offset-label");
+    if (offsetContainer) {
+        const isOffset = mode === "elapsed-offset" || mode === "countdown";
+        offsetContainer.classList.toggle("hidden", !isOffset);
+        if (offsetLabel) {
+            offsetLabel.textContent = mode === "countdown" ? "Minutes Remaining" : "Minutes Already Elapsed";
+        }
+    }
+    const tzContainer = document.getElementById("country-tz-container");
+    if (tzContainer) {
+        tzContainer.classList.toggle("hidden", mode !== "country-timezone");
+    }
     const partyDisabled = state.type !== 0;
     for (const key of ["partySize", "partyMax"]) {
         const input = fields.get(key);
@@ -469,36 +814,358 @@ function updateConditionalFields() {
             input.disabled = partyDisabled;
     }
     if (partyDisabled) {
-        must("partySize").value = "0";
-        must("partyMax").value = "0";
+        const pSize = fields.get("partySize");
+        const pMax = fields.get("partyMax");
+        if (pSize)
+            pSize.value = "0";
+        if (pMax)
+            pMax.value = "0";
     }
+}
+let liveTimerInterval = null;
+const sessionStartTime = Date.now();
+function startLivePreviewClock() {
+    if (liveTimerInterval)
+        window.clearInterval(liveTimerInterval);
+    liveTimerInterval = window.setInterval(() => {
+        updateLiveTimestampText();
+    }, 1000);
+}
+function updateLiveTimestampText() {
+    const timeEl = document.getElementById("preview-time");
+    if (!timeEl)
+        return;
+    const mode = state.timestampMode;
+    if (mode === "none") {
+        timeEl.classList.add("hidden");
+        return;
+    }
+    timeEl.classList.remove("hidden");
+    const now = Date.now();
+    const offsetMins = Math.max(0, Number(state.timerOffsetMinutes) || 0);
+    // Update country live clock badge if present
+    const tzClock = document.getElementById("tz-live-clock");
+    if (tzClock && mode === "country-timezone") {
+        try {
+            const tzTime = new Date().toLocaleTimeString("en-US", { timeZone: state.selectedTimezone || "UTC" });
+            tzClock.textContent = `Current time: ${tzTime}`;
+        }
+        catch {
+            tzClock.textContent = "";
+        }
+    }
+    if (mode === "elapsed-offset") {
+        const elapsedSeconds = Math.max(0, offsetMins * 60 + Math.floor((now - sessionStartTime) / 1000));
+        timeEl.textContent = `🎮 ${formatDuration(elapsedSeconds)} elapsed`;
+    }
+    else if (mode === "countdown") {
+        const remainingSeconds = Math.max(0, offsetMins * 60 - Math.floor((now - sessionStartTime) / 1000));
+        timeEl.textContent = `⏳ ${formatDuration(remainingSeconds)} left`;
+    }
+    else if (mode === "country-timezone") {
+        try {
+            const tz = state.selectedTimezone || "UTC";
+            const parts = new Intl.DateTimeFormat("en-US", {
+                timeZone: tz,
+                hour: "numeric",
+                minute: "numeric",
+                second: "numeric",
+                hour12: false
+            }).formatToParts(new Date());
+            const h = parseInt(parts.find(p => p.type === "hour")?.value || "0", 10);
+            const m = parts.find(p => p.type === "minute")?.value || "00";
+            const s = parts.find(p => p.type === "second")?.value || "00";
+            const hours12 = h % 12 || 12;
+            const tzShort = tz.split("/").pop()?.replace(/_/g, " ") || tz;
+            timeEl.textContent = `🌍 ${hours12}:${m}:${s} (${tzShort})`;
+        }
+        catch {
+            timeEl.textContent = "🌍 Timezone active";
+        }
+    }
+    else if (mode === "local-time") {
+        const current = new Date();
+        const hours12 = current.getHours() % 12 || 12;
+        const mm = String(current.getMinutes()).padStart(2, "0");
+        const ss = String(current.getSeconds()).padStart(2, "0");
+        timeEl.textContent = `🕒 ${hours12}:${mm}:${ss} (12h Local)`;
+    }
+    else if (mode === "custom") {
+        timeEl.textContent = state.customTimestampEndEnabled ? "📅 Custom range" : "📅 Custom timestamp";
+    }
+    else {
+        // last-connection, startup, presence-update: live ticking counter
+        const elapsedSeconds = Math.floor((now - sessionStartTime) / 1000);
+        timeEl.textContent = `🎮 ${formatDuration(elapsedSeconds)} elapsed`;
+    }
+}
+function formatDuration(totalSeconds) {
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const mm = String(minutes).padStart(2, "0");
+    const ss = String(seconds).padStart(2, "0");
+    if (hours > 0) {
+        return `${hours}:${mm}:${ss}`;
+    }
+    return `${mm}:${ss}`;
+}
+let cachedHealth = null;
+const BAR_STYLES = {
+    capsule: { fill: "▰", empty: "▱", wrap: ["", ""] },
+    shade: { fill: "█", empty: "░", wrap: ["", ""] },
+    medium: { fill: "█", empty: "▒", wrap: ["", ""] },
+    square: { fill: "■", empty: "□", wrap: ["", ""] },
+    circle: { fill: "●", empty: "○", wrap: ["", ""] },
+    diamond: { fill: "◆", empty: "◇", wrap: ["", ""] },
+    cyberpunk: { fill: "█", empty: "░", wrap: ["[", "]"] },
+    line: { fill: "━", empty: "┈", wrap: ["", ""] },
+    braille: { fill: "⣿", empty: "⣀", wrap: ["", ""] },
+    ascii: { fill: "=", empty: " ", wrap: ["[", "]"] }
+};
+function renderBarClient(percentage, styleKey = "capsule", length = 10) {
+    const s = BAR_STYLES[styleKey] || BAR_STYLES.capsule;
+    const filled = Math.min(length, Math.max(0, Math.round((percentage / 100) * length)));
+    const empty = length - filled;
+    return s.wrap[0] + s.fill.repeat(filled) + s.empty.repeat(empty) + s.wrap[1];
+}
+function interpolateClientPlaceholders(val) {
+    if (!val || !val.includes("{") || !cachedHealth?.ram)
+        return val;
+    const style = state.loadingBarStyle || "capsule";
+    const ramBar = renderBarClient(cachedHealth.ram.percentage, style);
+    const ramText = `${ramBar} ${cachedHealth.ram.percentage}% · RAM ${cachedHealth.ram.usedGb}/${cachedHealth.ram.totalGb} GB`;
+    const cpuPct = cachedHealth.cpu?.usagePercent || 0;
+    const cpuBar = renderBarClient(cpuPct, style);
+    const cpuText = `${cpuBar} ${cpuPct}% · CPU ${cachedHealth.cpu?.cleanModel || cachedHealth.cpu?.model || "Processor"}`;
+    const gpuPct = cachedHealth.gpu?.utilization || 0;
+    const gpuBar = renderBarClient(gpuPct, style);
+    const gpuText = `${gpuBar} ${gpuPct}% · GPU ${cachedHealth.gpu?.shortName || "GPU"}`;
+    return val
+        .replace(/{cpu}/gi, cpuText)
+        .replace(/{cpu_bar}/gi, cpuBar)
+        .replace(/{cpu_pct}/gi, `${cpuPct}%`)
+        .replace(/{gpu}/gi, gpuText)
+        .replace(/{gpu_bar}/gi, gpuBar)
+        .replace(/{gpu_pct}/gi, `${gpuPct}%`)
+        .replace(/{server_health}/gi, ramText)
+        .replace(/{ram}/gi, ramText)
+        .replace(/{ram_bar}/gi, ramBar)
+        .replace(/{ram_pct}/gi, `${cachedHealth.ram.percentage}%`)
+        .replace(/{ram_used}/gi, `${cachedHealth.ram.usedGb} GB`)
+        .replace(/{ram_total}/gi, `${cachedHealth.ram.totalGb} GB`)
+        .replace(/{hostname}/gi, cachedHealth.host?.hostname || "")
+        .replace(/{uptime}/gi, cachedHealth.host?.uptimeFormatted || "")
+        .replace(/{cpu_cores}/gi, `${cachedHealth.cpu?.cores || 0} Cores`);
+}
+async function fetchSystemHealth() {
+    try {
+        const style = state.loadingBarStyle || "capsule";
+        const res = await fetch(`/api/system/health?style=${encodeURIComponent(style)}`);
+        if (!res.ok)
+            return;
+        const data = await res.json();
+        cachedHealth = data;
+        // Update topbar pill
+        const topbarText = document.getElementById("topbar-health-text");
+        if (topbarText && data.ram) {
+            topbarText.textContent = data.ram.formatted;
+        }
+        // Update Tab 06 UI elements
+        const heroBar = document.getElementById("health-hero-bar");
+        if (heroBar && data.ram)
+            heroBar.textContent = data.ram.formatted;
+        const meterFill = document.getElementById("health-meter-fill");
+        if (meterFill && data.ram)
+            meterFill.style.width = `${data.ram.percentage}%`;
+        const ramUsed = document.getElementById("metric-ram-used");
+        if (ramUsed && data.ram)
+            ramUsed.textContent = `${data.ram.usedGb} GB`;
+        const ramFree = document.getElementById("metric-ram-free");
+        if (ramFree && data.ram)
+            ramFree.textContent = `${data.ram.freeGb} GB`;
+        const ramTotal = document.getElementById("metric-ram-total");
+        if (ramTotal && data.ram)
+            ramTotal.textContent = `${data.ram.totalGb} GB`;
+        const ramPct = document.getElementById("metric-ram-pct");
+        if (ramPct && data.ram)
+            ramPct.textContent = `${data.ram.percentage}%`;
+        const hostname = document.getElementById("spec-hostname");
+        if (hostname && data.host)
+            hostname.textContent = data.host.hostname;
+        const platform = document.getElementById("spec-platform");
+        if (platform && data.host)
+            platform.textContent = data.host.platform;
+        const uptime = document.getElementById("spec-uptime");
+        if (uptime && data.host)
+            uptime.textContent = data.host.uptimeFormatted;
+        const nodeVer = document.getElementById("spec-node");
+        if (nodeVer && data.process)
+            nodeVer.textContent = `${data.process.nodeVersion} (Heap: ${data.process.heapUsedMb}MB)`;
+        const cpuModel = document.getElementById("spec-cpu-model");
+        if (cpuModel && data.cpu)
+            cpuModel.textContent = data.cpu.model;
+        const cpuCores = document.getElementById("spec-cpu-cores");
+        if (cpuCores && data.cpu)
+            cpuCores.textContent = `${data.cpu.cores} Cores`;
+        const cpuLoad = document.getElementById("spec-cpu-load");
+        if (cpuLoad && data.cpu)
+            cpuLoad.textContent = `${data.cpu.usagePercent}%`;
+        const gpuName = document.getElementById("spec-gpu-name");
+        if (gpuName && data.gpu)
+            gpuName.textContent = data.gpu.shortName || data.gpu.name;
+        const gpuLoad = document.getElementById("spec-gpu-load");
+        if (gpuLoad && data.gpu)
+            gpuLoad.textContent = `${data.gpu.utilization}% (${data.gpu.usedGb}/${data.gpu.totalGb} GB)`;
+        // Always re-render preview with latest stats
+        updatePreview();
+    }
+    catch (err) {
+        console.warn("Could not fetch server health:", err);
+    }
+}
+function startSystemHealthPolling() {
+    void fetchSystemHealth();
+    window.setInterval(() => {
+        void fetchSystemHealth();
+    }, 3000);
 }
 function updatePreview() {
     const type = Number(state.type);
     text("preview-type", defaultNames[type] || "Playing");
     text("preview-name", state.name || "CustomRP");
-    text("preview-details", state.details || "Your details appear here");
-    text("preview-state", state.state || "Your state appears here");
-    text("preview-time", timestampLabel());
+    const style = state.loadingBarStyle || "capsule";
+    // Dynamic bar re-renders using client's chosen style
+    let cpuFormatted = cachedHealth?.cpu?.formatted || "⚡ CPU Usage";
+    if (cachedHealth?.cpu) {
+        const cBar = renderBarClient(cachedHealth.cpu.usagePercent, style);
+        cpuFormatted = `${cBar} ${cachedHealth.cpu.usagePercent}% · CPU ${cachedHealth.cpu.cleanModel || cachedHealth.cpu.model}`;
+    }
+    let gpuFormatted = cachedHealth?.gpu?.formatted || "🎮 GPU Usage";
+    if (cachedHealth?.gpu) {
+        const gBar = renderBarClient(cachedHealth.gpu.utilization, style);
+        gpuFormatted = `${gBar} ${cachedHealth.gpu.utilization}% · GPU ${cachedHealth.gpu.shortName}`;
+    }
+    let ramFormatted = cachedHealth?.ram?.formatted || "💾 RAM Usage";
+    if (cachedHealth?.ram) {
+        const rBar = renderBarClient(cachedHealth.ram.percentage, style);
+        ramFormatted = `${rBar} ${cachedHealth.ram.percentage}% · RAM ${cachedHealth.ram.usedGb}/${cachedHealth.ram.totalGb} GB`;
+    }
+    // Update Bar Style preview badge
+    const barStylePreview = document.getElementById("bar-style-preview");
+    if (barStylePreview) {
+        barStylePreview.textContent = renderBarClient(75, style);
+    }
+    // Update Hero & topbar with latest chosen style
+    const heroBar = document.getElementById("health-hero-bar");
+    if (heroBar && cachedHealth?.ram) {
+        heroBar.textContent = ramFormatted;
+    }
+    const topbarText = document.getElementById("topbar-health-text");
+    if (topbarText && cachedHealth?.ram) {
+        topbarText.textContent = ramFormatted;
+    }
+    // Line 1 Resolution
+    let line1Text = "";
+    const l1Mode = state.line1Mode || "cpu";
+    if (l1Mode === "cpu") {
+        line1Text = cpuFormatted;
+    }
+    else if (l1Mode === "gpu") {
+        line1Text = gpuFormatted;
+    }
+    else if (l1Mode === "ram") {
+        line1Text = ramFormatted;
+    }
+    else if (l1Mode === "custom") {
+        line1Text = interpolateClientPlaceholders(state.details || "");
+    }
+    else if (l1Mode === "none") {
+        line1Text = "";
+    }
+    // Line 2 Resolution
+    let line2Text = "";
+    const l2Mode = state.line2Mode || "ram";
+    if (l2Mode === "ram") {
+        line2Text = ramFormatted;
+    }
+    else if (l2Mode === "cpu") {
+        line2Text = cpuFormatted;
+    }
+    else if (l2Mode === "gpu") {
+        line2Text = gpuFormatted;
+    }
+    else if (l2Mode === "custom") {
+        line2Text = interpolateClientPlaceholders(state.state || "");
+    }
+    else if (l2Mode === "none") {
+        line2Text = "";
+    }
+    const pDetails = document.getElementById("preview-details");
+    if (pDetails) {
+        pDetails.textContent = line1Text || "No details";
+        pDetails.classList.toggle("hidden", !line1Text && l1Mode === "none");
+    }
+    const pState = document.getElementById("preview-state");
+    if (pState) {
+        pState.textContent = line2Text || "No state";
+        pState.classList.toggle("hidden", !line2Text && l2Mode === "none");
+    }
+    // Update badges & summary boxes
+    const b1 = document.getElementById("line1-live-badge");
+    if (b1)
+        b1.textContent = line1Text ? `Active: ${line1Text}` : "(Hidden)";
+    const b2 = document.getElementById("line2-live-badge");
+    if (b2)
+        b2.textContent = line2Text ? `Active: ${line2Text}` : "(Hidden)";
+    const s1 = document.getElementById("line1-summary-box");
+    if (s1)
+        s1.textContent = line1Text || "(Empty - Line 1 Hidden)";
+    const s2 = document.getElementById("line2-summary-box");
+    if (s2)
+        s2.textContent = line2Text || "(Empty - Line 2 Hidden)";
+    // Toggle custom text input containers
+    const l1Container = document.getElementById("line1-custom-container");
+    if (l1Container)
+        l1Container.classList.toggle("hidden", l1Mode !== "custom");
+    const l2Container = document.getElementById("line2-custom-container");
+    if (l2Container)
+        l2Container.classList.toggle("hidden", l2Mode !== "custom");
+    updateLiveTimestampText();
     const party = document.querySelector("#preview-party");
     if (party) {
         const showParty = type === 0 && state.partySize > 0 && state.partyMax > 0;
         party.classList.toggle("hidden", !showParty);
         party.querySelector("span").textContent = `${state.partySize} / ${state.partyMax}`;
     }
-    // Only update static art if animation is NOT active
-    if (!animationActive) {
+    // Only update static art if that target is NOT animating
+    if (largeFrames.length < 2) {
         updateArt("large-art", state.largeKey);
     }
-    updateArt("small-art", state.smallKey);
+    if (smallFrames.length < 2) {
+        updateArt("small-art", state.smallKey);
+    }
     const buttons = must("preview-buttons");
     buttons.innerHTML = "";
     for (const [label, url] of [[state.button1Text, state.button1Url], [state.button2Text, state.button2Url]]) {
-        if (!label || !url)
+        const trimmedLabel = label ? label.trim() : "";
+        const trimmedUrl = url ? url.trim() : "";
+        if (!trimmedLabel && !trimmedUrl)
             continue;
-        const button = document.createElement("div");
+        const button = document.createElement("a");
         button.className = "preview-button";
-        button.textContent = label;
+        button.textContent = trimmedLabel || "Button";
+        if (trimmedUrl) {
+            const normalized = /^https?:\/\//i.test(trimmedUrl) ? trimmedUrl : `https://${trimmedUrl}`;
+            button.href = normalized;
+            button.target = "_blank";
+            button.rel = "noopener noreferrer";
+            button.title = `Opens ${normalized}`;
+        }
+        else {
+            button.title = "Enter a URL in Section 06 to make this button clickable";
+            button.classList.add("preview-button-pending");
+        }
         buttons.append(button);
     }
 }
@@ -517,13 +1184,17 @@ function timestampLabel() {
         default: return "Since connection";
     }
 }
-async function postPresence(action) {
+async function postPresence(action, silent = false) {
     if (!state.applicationId.trim()) {
-        showNotice("Add your Discord application ID before connecting.", "error");
-        must("applicationId").focus();
+        if (!silent) {
+            showNotice("Add your Discord application ID before connecting.", "error");
+            must("applicationId").focus();
+        }
         return;
     }
-    showNotice(action === "connect" ? "Connecting to Discord…" : "Updating presence…");
+    if (!silent) {
+        showNotice(action === "connect" ? "Connecting to Discord…" : "Updating presence in Discord…");
+    }
     try {
         const response = await fetch(`/api/presence/${action}`, {
             method: "POST",
@@ -533,31 +1204,46 @@ async function postPresence(action) {
         const data = await response.json();
         if (!response.ok)
             throw new Error(data.error || "The local bridge could not complete the request.");
-        showNotice(action === "connect" ? "Connected — your presence is live in Discord." : "Presence updated.", "success");
+        isBridgeConnected = true;
+        if (!silent) {
+            showNotice(action === "connect"
+                ? "Connected — your presence & buttons are live in Discord!"
+                : "Presence & buttons updated live in Discord!", "success");
+        }
         // If frames exist, ensure the animation cycling is active on Discord & in preview
-        if (frames.length >= 2) {
-            const intervalMs = Number(document.getElementById("anim-interval").value) || 200;
+        const intervalMs = getIntervalMs();
+        if (largeFrames.length >= 2) {
             void fetch("/api/animation/start", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ urls: frames.map((f) => f.url), intervalMs })
+                body: JSON.stringify({ target: "large", urls: largeFrames.map((f) => f.url), intervalMs })
             });
-            animationActive = true;
-            updateAnimControls();
-            startAnimPreview();
         }
+        if (smallFrames.length >= 2) {
+            void fetch("/api/animation/start", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ target: "small", urls: smallFrames.map((f) => f.url), intervalMs })
+            });
+        }
+        startOrUpdatePreviews();
         await refreshStatus();
     }
     catch (error) {
-        showNotice(error instanceof Error ? error.message : "Could not reach the local bridge.", "error");
+        if (!silent) {
+            showNotice(error instanceof Error ? error.message : "Could not reach the local bridge.", "error");
+        }
         await refreshStatus();
     }
 }
 async function disconnect() {
-    await stopAnimation();
+    stopAnimPreview();
+    isBridgeConnected = false;
+    sessionStorage.setItem("customrp-manual-disconnect", "true");
     try {
+        await fetch("/api/animation/stop", { method: "POST" });
         await fetch("/api/presence/disconnect", { method: "POST" });
-        showNotice("Disconnected from Discord.", "success");
+        showNotice("Disconnected from Discord. Click 'Connect Discord' when you want to reconnect.", "success");
     }
     catch {
         showNotice("The local bridge is not reachable.", "error");
@@ -568,22 +1254,43 @@ async function refreshStatus() {
     try {
         const response = await fetch("/api/status");
         const status = await response.json();
+        isBridgeConnected = Boolean(status.connected);
         must("bridge-dot").classList.toggle("connected", status.connected);
         text("bridge-copy", status.connected ? `Connected · ${status.applicationId || "Discord"}` : "Waiting for Discord");
     }
     catch {
+        isBridgeConnected = false;
         text("bridge-copy", "Start the local server first");
     }
 }
 /* ═══════════════════════════════════════════════════════════════════════════
-   PERSISTENCE
+   PERSISTENCE & DATABASE SYNC
 ═══════════════════════════════════════════════════════════════════════════ */
 function persistState() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+    catch { /* ignore */ }
+    void saveStateToDatabase();
+}
+async function saveStateToDatabase() {
+    try {
+        await fetch("/api/presence/save", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(state)
+        });
+    }
+    catch (err) {
+        console.warn("Could not save presence to database:", err);
+    }
 }
 function loadState(fallback) {
     try {
         const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+        if (fallback.applicationId && !stored?.applicationId) {
+            return { ...fallback, ...stored, applicationId: fallback.applicationId };
+        }
         return { ...fallback, ...stored, applicationId: stored?.applicationId || fallback.applicationId };
     }
     catch {
@@ -612,9 +1319,13 @@ function resetEditor() {
     if (!confirm("Reset the editor to its default values?"))
         return;
     state = serverDefault ? { ...serverDefault } : state;
-    localStorage.removeItem(STORAGE_KEY);
+    try {
+        localStorage.removeItem(STORAGE_KEY);
+    }
+    catch { /* ignore */ }
     writeStateToForm();
     render();
+    void saveStateToDatabase();
     showNotice("Editor reset.", "success");
 }
 /* ═══════════════════════════════════════════════════════════════════════════

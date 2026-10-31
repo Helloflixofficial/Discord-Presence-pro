@@ -12,12 +12,16 @@
 import express from "express";
 import multer from "multer";
 import AdmZip from "adm-zip";
-import { getFrames, insertFrame, deleteFrame, reorderFrames, clearFrames } from "./db.js";
+import { getFrames, insertFrame, deleteFrame, reorderFrames, clearFrames, type FrameTarget } from "./db.js";
 import { uploadBuffer, deleteByKey } from "./uploadClient.js";
 import { pool } from "./db.js";
 import { bridge } from "./server.js";
 
 const router = express.Router();
+
+function parseTarget(val: unknown): FrameTarget {
+  return val === "small" ? "small" : "large";
+}
 
 // Keep files in memory (max 50 MB total per request)
 const upload = multer({
@@ -35,9 +39,11 @@ const zipUpload = multer({
 });
 
 /* ─── GET /api/frames ──────────────────────────────────────────────────── */
-router.get("/", async (_req, res) => {
+router.get("/", async (req, res) => {
   try {
-    const frames = await getFrames();
+    const targetParam = req.query.target as string | undefined;
+    const target = targetParam ? parseTarget(targetParam) : undefined;
+    const frames = await getFrames(target);
     res.json({ frames });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -53,13 +59,14 @@ router.post("/upload", upload.array("files", 25), async (req, res) => {
       return;
     }
 
-    const existing = await getFrames();
+    const target = parseTarget(req.body.target || req.query.target);
+    const existing = await getFrames(target);
     let position = existing.length;
 
     const inserted = [];
     for (const file of files) {
       const { url, key } = await uploadBuffer(file.buffer, file.originalname, file.mimetype);
-      const frame = await insertFrame(url, key, file.originalname, position++);
+      const frame = await insertFrame(url, key, file.originalname, position++, target);
       inserted.push(frame);
     }
 
@@ -78,6 +85,7 @@ router.post("/upload-zip", zipUpload.single("file"), async (req, res) => {
       return;
     }
 
+    const target = parseTarget(req.body.target || req.query.target);
     const zip = new AdmZip(req.file.buffer);
     const entries = zip.getEntries().filter((e) => {
       if (e.isDirectory) return false;
@@ -99,7 +107,7 @@ router.post("/upload-zip", zipUpload.single("file"), async (req, res) => {
     // Natural-sort the filenames so frame order is predictable (e.g. frame_01, frame_02)
     entries.sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
 
-    const existing = await getFrames();
+    const existing = await getFrames(target);
     let position = existing.length;
     const inserted = [];
 
@@ -108,7 +116,7 @@ router.post("/upload-zip", zipUpload.single("file"), async (req, res) => {
       const fileName = entry.entryName.split("/").at(-1) || entry.entryName;
       const mime = guessMime(fileName);
       const { url, key } = await uploadBuffer(buffer, fileName, mime);
-      const frame = await insertFrame(url, key, fileName, position++);
+      const frame = await insertFrame(url, key, fileName, position++, target);
       inserted.push(frame);
     }
 
@@ -155,19 +163,20 @@ router.post("/reorder", async (req, res) => {
       return;
     }
     await reorderFrames(orderedIds);
-    const frames = await getFrames();
     void bridge.syncFramesFromDb();
-    res.json({ frames });
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
 });
 
-/* ─── DELETE /api/frames (clear all) ─────────────────────────────────── */
-router.delete("/", async (_req, res) => {
+/* ─── DELETE /api/frames (clear) ─────────────────────────────────────── */
+router.delete("/", async (req, res) => {
   try {
-    const frames = await getFrames();
-    await clearFrames();
+    const targetParam = req.query.target as string | undefined;
+    const target = targetParam ? parseTarget(targetParam) : undefined;
+    const frames = await getFrames(target);
+    await clearFrames(target);
     try {
       const { utapi } = await import("./uploadClient.js");
       await utapi.deleteFiles(frames.map((f) => f.key));
