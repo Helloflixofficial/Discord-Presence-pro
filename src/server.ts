@@ -5,14 +5,14 @@ import { fileURLToPath } from "node:url";
 import { DiscordBridge } from "./discordBridge.js";
 import { defaultPresence, type PresenceConfig } from "./types.js";
 import { migrate, getStoredPresence, savePresenceToDb } from "./db.js";
-import framesRouter from "./framesRouter.js";
+import framesRouter, { prewarmFramesCache } from "./framesRouter.js";
 import { getSystemHealth } from "./systemHealth.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const currentDir = path.dirname(currentFile);
 const webRoot = path.resolve(currentDir, "..");
 const publicDir = path.join(webRoot, "public");
-const host = process.env.HOST || "127.0.0.1";
+const host = process.env.HOST || "0.0.0.0";
 const port = Number(process.env.PORT || 3000);
 const configuredClientId = process.env.DISCORD_CLIENT_ID || "";
 export const bridge = new DiscordBridge();
@@ -20,7 +20,7 @@ const app = express();
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "100kb" }));
-app.use(express.static(publicDir));
+app.use(express.static(publicDir, { maxAge: "2h", etag: true }));
 
 // ─── Animation Frames API ───────────────────────────────────────────────────
 app.use("/api/frames", framesRouter);
@@ -132,6 +132,7 @@ async function boot(): Promise<void> {
     console.log("Database ready.");
     await bridge.syncFramesFromDb();
     console.log("Animation frames synced from database.");
+    void prewarmFramesCache();
 
     // Auto-connect to Discord on startup if presence config exists
     const stored = await getStoredPresence("default");

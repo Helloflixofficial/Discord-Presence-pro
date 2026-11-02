@@ -526,9 +526,13 @@ function updateAnimControls() {
 /* ═══════════════════════════════════════════════════════════════════════════
    LOCAL ANIMATION PREVIEW (in the Discord mock + strip)
 ═══════════════════════════════════════════════════════════════════════════ */
+let lastActiveStripIdx = -1;
 function startAnimPreview() {
     stopAnimPreview();
-    const intervalMs = getIntervalMs();
+    if (document.hidden)
+        return;
+    // Cap client preview interval to at least 150ms so browser and mobile UI remain butter-smooth
+    const intervalMs = Math.max(getIntervalMs(), 150);
     animLargeIndex = 0;
     animSmallIndex = 0;
     updateAnimPreviewStrip();
@@ -550,6 +554,7 @@ function updateAnimPreviewStrip() {
     strip.classList.remove("hidden");
     const stripFrames = must("anim-strip-frames");
     stripFrames.innerHTML = "";
+    lastActiveStripIdx = -1;
     activeFrames.forEach((f, i) => {
         const div = document.createElement("div");
         div.className = "strip-frame";
@@ -567,6 +572,8 @@ function updateAnimPreviewStrip() {
     must("anim-strip-count").textContent = String(activeFrames.length);
 }
 function tickAnimPreview() {
+    if (document.hidden)
+        return;
     // Update large art if animating
     if (largeFrames.length >= 2) {
         animLargeIndex = (animLargeIndex + 1) % largeFrames.length;
@@ -595,12 +602,17 @@ function tickAnimPreview() {
         art.classList.remove("has-image");
         art.style.backgroundImage = "";
     }
-    // Highlight strip frame for active target
+    // Efficient O(1) strip frame highlight - No querySelectorAll on every tick
     const activeFrames = getActiveFrames();
     if (activeFrames.length >= 2) {
         const activeIdx = activeTarget === "large" ? animLargeIndex : animSmallIndex;
-        document.querySelectorAll(".strip-frame").forEach((el) => el.classList.remove("active"));
-        document.getElementById(`strip-${activeIdx}`)?.classList.add("active");
+        if (lastActiveStripIdx !== activeIdx) {
+            if (lastActiveStripIdx !== -1) {
+                document.getElementById(`strip-${lastActiveStripIdx}`)?.classList.remove("active");
+            }
+            document.getElementById(`strip-${activeIdx}`)?.classList.add("active");
+            lastActiveStripIdx = activeIdx;
+        }
     }
 }
 function stopAnimPreview() {
@@ -707,13 +719,21 @@ async function reorderByDrop(srcId, targetId) {
         showNotice("Could not save frame order.", "error");
     }
 }
-let saveTimer = null;
+let dbSaveTimer = null;
+let isSavingDb = false;
+let hasQueuedDbSave = false;
 function persistStateDebounced() {
-    if (saveTimer)
-        window.clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(() => {
-        persistState();
-    }, 200);
+    // 1. Immediately persist to localStorage for instant local responsiveness (< 0.1ms)
+    try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+    catch { /* ignore */ }
+    // 2. Debounce cloud database save to 1200ms to eliminate network lag and typing chattering
+    if (dbSaveTimer)
+        window.clearTimeout(dbSaveTimer);
+    dbSaveTimer = window.setTimeout(() => {
+        void flushStateToDatabase();
+    }, 1200);
 }
 let renderPending = false;
 function scheduleRender() {
@@ -1167,28 +1187,38 @@ function updatePreview() {
         updateArt("small-art", state.smallKey);
     }
     const buttons = must("preview-buttons");
-    buttons.innerHTML = "";
-    for (const [label, url] of [[state.button1Text, state.button1Url], [state.button2Text, state.button2Url]]) {
-        const trimmedLabel = label ? label.trim() : "";
-        const trimmedUrl = url ? url.trim() : "";
-        if (!trimmedLabel && !trimmedUrl)
-            continue;
-        const button = document.createElement("a");
-        button.className = "preview-button";
-        button.textContent = trimmedLabel || "Button";
-        if (trimmedUrl) {
-            const normalized = /^https?:\/\//i.test(trimmedUrl) ? trimmedUrl : `https://${trimmedUrl}`;
+    const buttonConfigs = [
+        { label: state.button1Text ? state.button1Text.trim() : "", url: state.button1Url ? state.button1Url.trim() : "" },
+        { label: state.button2Text ? state.button2Text.trim() : "", url: state.button2Url ? state.button2Url.trim() : "" }
+    ];
+    const activeConfigs = buttonConfigs.filter((b) => b.label || b.url);
+    if (buttons.childElementCount !== activeConfigs.length) {
+        buttons.innerHTML = "";
+        activeConfigs.forEach(() => {
+            const button = document.createElement("a");
+            button.className = "preview-button";
+            buttons.append(button);
+        });
+    }
+    activeConfigs.forEach((cfg, idx) => {
+        const button = buttons.children[idx];
+        if (!button)
+            return;
+        button.textContent = cfg.label || "Button";
+        if (cfg.url) {
+            const normalized = /^https?:\/\//i.test(cfg.url) ? cfg.url : `https://${cfg.url}`;
             button.href = normalized;
             button.target = "_blank";
             button.rel = "noopener noreferrer";
             button.title = `Opens ${normalized}`;
+            button.classList.remove("preview-button-pending");
         }
         else {
+            button.removeAttribute("href");
             button.title = "Enter a URL in Section 06 to make this button clickable";
             button.classList.add("preview-button-pending");
         }
-        buttons.append(button);
-    }
+    });
 }
 function updateArt(id, value) {
     const art = must(id);
@@ -1284,9 +1314,15 @@ function persistState() {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     }
     catch { /* ignore */ }
-    void saveStateToDatabase();
+    void flushStateToDatabase();
 }
-async function saveStateToDatabase() {
+async function flushStateToDatabase() {
+    if (isSavingDb) {
+        hasQueuedDbSave = true;
+        return;
+    }
+    isSavingDb = true;
+    hasQueuedDbSave = false;
     try {
         await fetch("/api/presence/save", {
             method: "POST",
@@ -1297,7 +1333,47 @@ async function saveStateToDatabase() {
     catch (err) {
         console.warn("Could not save presence to database:", err);
     }
+    finally {
+        isSavingDb = false;
+        if (hasQueuedDbSave) {
+            hasQueuedDbSave = false;
+            void flushStateToDatabase();
+        }
+    }
 }
+// ── Mobile & Tab Lifecycle Listeners: Pause CPU timers in background, flush data ──
+document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+        // Mobile screen locked or tab backgrounded: flush database save immediately
+        if (dbSaveTimer) {
+            window.clearTimeout(dbSaveTimer);
+            dbSaveTimer = null;
+            void flushStateToDatabase();
+        }
+        // Pause animation and health polling to eliminate background CPU drain
+        stopAnimPreview();
+        if (liveTimerInterval) {
+            clearInterval(liveTimerInterval);
+            liveTimerInterval = null;
+        }
+        if (healthPollTimer) {
+            clearInterval(healthPollTimer);
+            healthPollTimer = null;
+        }
+    }
+    else {
+        // Resumed: restart preview animations, clock, and polling smoothly
+        startOrUpdatePreviews();
+        startLivePreviewClock();
+        syncHealthPolling();
+    }
+});
+window.addEventListener("pagehide", () => {
+    try {
+        navigator.sendBeacon("/api/presence/save", new Blob([JSON.stringify(state)], { type: "application/json" }));
+    }
+    catch { /* ignore */ }
+});
 function loadState(fallback) {
     try {
         const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
@@ -1338,7 +1414,7 @@ function resetEditor() {
     catch { /* ignore */ }
     writeStateToForm();
     render();
-    void saveStateToDatabase();
+    void flushStateToDatabase();
     showNotice("Editor reset.", "success");
 }
 /* ═══════════════════════════════════════════════════════════════════════════

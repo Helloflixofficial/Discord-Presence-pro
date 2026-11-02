@@ -26,6 +26,29 @@ function parseTarget(val: unknown): FrameTarget {
 // In-memory image buffer cache for instant zero-latency serving and ad-blocker immunity
 const imageCache = new Map<number, { buffer: Buffer; contentType: string }>();
 
+/** Pre-warm in-memory cache on startup for lightning-fast mobile and desktop loading */
+export async function prewarmFramesCache(): Promise<void> {
+  try {
+    const result = await pool.query("SELECT id, url, file_name FROM animation_frames ORDER BY position ASC LIMIT 50");
+    for (const row of result.rows as { id: number; url: string; file_name: string }[]) {
+      if (imageCache.has(row.id)) continue;
+      try {
+        const upstream = await fetch(row.url);
+        if (upstream.ok) {
+          const arrayBuffer = await upstream.arrayBuffer();
+          const buffer = Buffer.from(arrayBuffer);
+          const contentType = upstream.headers.get("content-type") || guessMime(row.file_name);
+          imageCache.set(row.id, { buffer, contentType });
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
 // Keep files in memory (max 50 MB total per request)
 const upload = multer({
   storage: multer.memoryStorage(),

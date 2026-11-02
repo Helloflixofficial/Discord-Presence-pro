@@ -25,19 +25,34 @@
    RESET & BASE
 ═══════════════════════════════════════════════════════════════════════════ */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { scroll-behavior: smooth; }
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
 body {
   background: var(--bg);
   color: var(--fg);
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   line-height: 1.6;
+  -webkit-tap-highlight-color: transparent;
 }
-button, input, select, textarea { font: inherit; }
+button, input, select, textarea {
+  font: inherit;
+  touch-action: manipulation;
+}
 button { cursor: pointer; }
-a { color: inherit; text-decoration: none; }
+a { color: inherit; text-decoration: none; touch-action: manipulation; }
 h1, h2, h3 { color: var(--fg-primary); font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; }
+
+/* GPU Hardware Acceleration for smooth animations without frame drops */
+.discord-mock, .large-art, .small-art, .frame-img, .strip-frame {
+  will-change: transform;
+  transform: translateZ(0);
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
    APP SHELL & TOPBAR
@@ -244,6 +259,7 @@ h1, h2, h3 { color: var(--fg-primary); font-weight: 700; letter-spacing: 0.1em; 
   padding-bottom: 10px;
   overflow-x: auto;
   scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
 }
 .nav-tabs::-webkit-scrollbar { display: none; }
 
@@ -258,12 +274,13 @@ h1, h2, h3 { color: var(--fg-primary); font-weight: 700; letter-spacing: 0.1em; 
   letter-spacing: 0.08em;
   text-transform: uppercase;
   cursor: pointer;
-  transition: all .15s;
+  transition: border-color .12s, color .12s, background .12s;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   border-radius: 0;
   white-space: nowrap;
+  touch-action: manipulation;
 }
 .nav-tab:hover {
   border-color: var(--border-bright);
@@ -547,7 +564,8 @@ h1, h2, h3 { color: var(--fg-primary); font-weight: 700; letter-spacing: 0.1em; 
   text-decoration: none;
   cursor: pointer;
   border-radius: 0;
-  transition: all .15s;
+  transition: border-color .12s, color .12s, background .12s;
+  touch-action: manipulation;
 }
 .preview-button:hover {
   border-color: var(--accent);
@@ -782,12 +800,16 @@ h1, h2, h3 { color: var(--fg-primary); font-weight: 700; letter-spacing: 0.1em; 
 }
 
 @media (max-width: 600px) {
-  .app-shell { padding: 0 12px; }
-  .topbar { flex-direction: column; align-items: flex-start; gap: 10px; }
-  .topbar-actions { width: 100%; flex-wrap: wrap; }
+  .app-shell { padding: 0 10px; }
+  .topbar { flex-direction: column; align-items: stretch; gap: 12px; }
+  .topbar-brand { min-width: 0; }
+  .topbar-actions { width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .field-grid, .field-grid-3, .asset-grid, .party-grid, .custom-timestamps { grid-template-columns: 1fr; }
   .field-span-2 { grid-column: auto; }
   .rpc-button-row { grid-template-columns: 1fr; gap: 6px; }
   .button-index { padding: 0; }
-  .frame-grid { grid-template-columns: repeat(auto-fill, minmax(68px,1fr)); }
+  .frame-grid { grid-template-columns: repeat(auto-fill, minmax(70px, 1fr)); }
+  .health-stats-grid { grid-template-columns: 1fr; }
+  .preview-sticky { position: static; }
+  .nav-tab { padding: 6px 10px; font-size: 10px; }
 }
