@@ -121,7 +121,44 @@ router.get("/proxy", async (req, res) => {
       res.status(400).send("Invalid URL.");
       return;
     }
-    const upstream = await fetch(rawUrl);
+
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      res.status(400).send("Malformed URL.");
+      return;
+    }
+
+    // SSRF Protection: Block private network addresses (localhost, 127.0.0.1, 10.x, 192.168.x, 169.254.x, ::1)
+    const hostname = parsed.hostname.toLowerCase();
+    if (
+      hostname === "localhost" ||
+      hostname.endsWith(".localhost") ||
+      hostname === "127.0.0.1" ||
+      hostname === "::1" ||
+      hostname === "0.0.0.0" ||
+      hostname.startsWith("10.") ||
+      hostname.startsWith("192.168.") ||
+      hostname.startsWith("169.254.") ||
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname)
+    ) {
+      res.status(403).send("Access to local/private addresses is forbidden.");
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000); // 6s timeout to prevent hanging connections
+
+    const upstream = await fetch(rawUrl, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "CustomRP-Studio/1.0",
+        "Accept": "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+      }
+    });
+    clearTimeout(timeout);
+
     if (!upstream.ok) {
       res.status(upstream.status).send("Failed to retrieve external image.");
       return;
@@ -132,7 +169,7 @@ router.get("/proxy", async (req, res) => {
     res.setHeader("Cache-Control", "public, max-age=86400");
     res.send(Buffer.from(arrayBuffer));
   } catch (err) {
-    res.status(500).send(String(err));
+    res.status(500).send(err instanceof Error && err.name === "AbortError" ? "Image fetch timed out" : String(err));
   }
 });
 

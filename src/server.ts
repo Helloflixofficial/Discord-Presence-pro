@@ -19,6 +19,20 @@ export const bridge = new DiscordBridge();
 const app = express();
 
 app.disable("x-powered-by");
+
+// Security Headers & Mobile Protection
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https: http:; connect-src 'self' https: http:;"
+  );
+  next();
+});
+
 app.use(express.json({ limit: "100kb" }));
 app.use(express.static(publicDir, { maxAge: "2h", etag: true }));
 
