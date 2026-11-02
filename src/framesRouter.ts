@@ -23,6 +23,9 @@ function parseTarget(val: unknown): FrameTarget {
   return val === "small" ? "small" : "large";
 }
 
+// In-memory image buffer cache for instant zero-latency serving and ad-blocker immunity
+const imageCache = new Map<number, { buffer: Buffer; contentType: string }>();
+
 // Keep files in memory (max 50 MB total per request)
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -36,6 +39,78 @@ const upload = multer({
 const zipUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 200 * 1024 * 1024, files: 1 },
+});
+
+/* ─── GET /api/frames/:id/image (Local Proxy to bypass ad-blockers) ──────── */
+router.get("/:id/image", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).send("Invalid frame ID.");
+      return;
+    }
+
+    // Fast memory cache hit
+    if (imageCache.has(id)) {
+      const cached = imageCache.get(id)!;
+      res.setHeader("Content-Type", cached.contentType);
+      res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+      res.send(cached.buffer);
+      return;
+    }
+
+    const result = await pool.query("SELECT url, file_name FROM animation_frames WHERE id = $1", [id]);
+    if (result.rows.length === 0) {
+      res.status(404).send("Frame not found.");
+      return;
+    }
+
+    const { url, file_name } = result.rows[0] as { url: string; file_name: string };
+    const upstream = await fetch(url);
+    if (!upstream.ok) {
+      res.status(upstream.status).send("Failed to retrieve image upstream.");
+      return;
+    }
+
+    const arrayBuffer = await upstream.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const contentType = upstream.headers.get("content-type") || guessMime(file_name);
+
+    if (imageCache.size > 150) {
+      const oldest = imageCache.keys().next().value;
+      if (oldest !== undefined) imageCache.delete(oldest);
+    }
+    imageCache.set(id, { buffer, contentType });
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+    res.send(buffer);
+  } catch (err) {
+    res.status(500).send(String(err));
+  }
+});
+
+/* ─── GET /api/frames/proxy (General image proxy for external URLs) ─────── */
+router.get("/proxy", async (req, res) => {
+  try {
+    const rawUrl = req.query.url;
+    if (typeof rawUrl !== "string" || !rawUrl.startsWith("http")) {
+      res.status(400).send("Invalid URL.");
+      return;
+    }
+    const upstream = await fetch(rawUrl);
+    if (!upstream.ok) {
+      res.status(upstream.status).send("Failed to retrieve external image.");
+      return;
+    }
+    const arrayBuffer = await upstream.arrayBuffer();
+    const contentType = upstream.headers.get("content-type") || "image/png";
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.send(Buffer.from(arrayBuffer));
+  } catch (err) {
+    res.status(500).send(String(err));
+  }
 });
 
 /* ─── GET /api/frames ──────────────────────────────────────────────────── */
@@ -67,6 +142,7 @@ router.post("/upload", upload.array("files", 25), async (req, res) => {
     for (const file of files) {
       const { url, key } = await uploadBuffer(file.buffer, file.originalname, file.mimetype);
       const frame = await insertFrame(url, key, file.originalname, position++, target);
+      imageCache.set(frame.id, { buffer: file.buffer, contentType: file.mimetype });
       inserted.push(frame);
     }
 
@@ -117,6 +193,7 @@ router.post("/upload-zip", zipUpload.single("file"), async (req, res) => {
       const mime = guessMime(fileName);
       const { url, key } = await uploadBuffer(buffer, fileName, mime);
       const frame = await insertFrame(url, key, fileName, position++, target);
+      imageCache.set(frame.id, { buffer, contentType: mime });
       inserted.push(frame);
     }
 
@@ -142,6 +219,7 @@ router.delete("/:id", async (req, res) => {
     }
     const { key } = result.rows[0] as { key: string };
     await deleteFrame(id);
+    imageCache.delete(id);
     try {
       await deleteByKey(key);
     } catch {
@@ -177,6 +255,7 @@ router.delete("/", async (req, res) => {
     const target = targetParam ? parseTarget(targetParam) : undefined;
     const frames = await getFrames(target);
     await clearFrames(target);
+    frames.forEach((f) => imageCache.delete(f.id));
     try {
       const { utapi } = await import("./uploadClient.js");
       await utapi.deleteFiles(frames.map((f) => f.key));

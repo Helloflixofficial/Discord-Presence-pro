@@ -104,7 +104,7 @@ async function bootstrap(): Promise<void> {
   render();
   bindActions();
   startLivePreviewClock();
-  startSystemHealthPolling();
+  syncHealthPolling();
   await refreshStatus();
   await loadFrames();
 
@@ -175,6 +175,9 @@ function bindActions(): void {
       try {
         localStorage.setItem("customrp-active-tab", targetId);
       } catch { /* ignore */ }
+
+      // Dynamically start/stop hardware monitoring depending on active tab or profile settings
+      syncHealthPolling();
     });
   });
 
@@ -576,6 +579,10 @@ function startAnimPreview(): void {
   tickAnimPreview(); // immediate first tick
 }
 
+function getFrameSrc(frame: AnimationFrame): string {
+  return `/api/frames/${frame.id}/image`;
+}
+
 function updateAnimPreviewStrip(): void {
   const activeFrames = getActiveFrames();
   const strip = must<HTMLDivElement>("anim-preview-strip");
@@ -592,8 +599,11 @@ function updateAnimPreviewStrip(): void {
     div.className = "strip-frame";
     div.id = `strip-${i}`;
     const img = document.createElement("img");
-    img.src = f.url;
+    img.src = getFrameSrc(f);
     img.alt = f.file_name;
+    img.onerror = () => {
+      if (img.src !== f.url) img.src = f.url;
+    };
     div.appendChild(img);
     stripFrames.appendChild(div);
   });
@@ -604,7 +614,8 @@ function tickAnimPreview(): void {
   // Update large art if animating
   if (largeFrames.length >= 2) {
     animLargeIndex = (animLargeIndex + 1) % largeFrames.length;
-    const url = largeFrames[animLargeIndex].url;
+    const frame = largeFrames[animLargeIndex];
+    const url = getFrameSrc(frame);
     const art = must<HTMLDivElement>("large-art");
     art.classList.add("has-image");
     art.style.backgroundImage = `url("${CSS.escape(url)}")`;
@@ -617,7 +628,8 @@ function tickAnimPreview(): void {
   // Update small art if animating
   if (smallFrames.length >= 2) {
     animSmallIndex = (animSmallIndex + 1) % smallFrames.length;
-    const url = smallFrames[animSmallIndex].url;
+    const frame = smallFrames[animSmallIndex];
+    const url = getFrameSrc(frame);
     const art = must<HTMLDivElement>("small-art");
     art.classList.add("has-image");
     art.style.backgroundImage = `url("${CSS.escape(url)}")`;
@@ -659,9 +671,12 @@ function renderFrameGrid(): void {
     card.id = `frame-card-${frame.id}`;
 
     const img = document.createElement("img");
-    img.src = frame.url;
+    img.src = getFrameSrc(frame);
     img.alt = frame.file_name;
     img.className = "frame-img";
+    img.onerror = () => {
+      if (img.src !== frame.url) img.src = frame.url;
+    };
     card.appendChild(img);
 
     const overlay = document.createElement("div");
@@ -803,6 +818,7 @@ function render(): void {
   updateCounters();
   updateConditionalFields();
   updatePreview();
+  syncHealthPolling();
   const id = state.applicationId.trim();
   must<HTMLAnchorElement>("assets-link").href = id
     ? `https://discord.com/developers/applications/${encodeURIComponent(id)}/rich-presence/assets`
@@ -1104,11 +1120,46 @@ async function fetchSystemHealth(): Promise<void> {
   }
 }
 
-function startSystemHealthPolling(): void {
-  void fetchSystemHealth();
-  window.setInterval(() => {
-    void fetchSystemHealth();
-  }, 3000);
+function isHardwareActive(): boolean {
+  // Active only if user selected hardware stats on profile, or is viewing Tab 06 Server Health
+  const onProfile = Boolean(
+    state.line1Mode === "cpu" ||
+    state.line1Mode === "gpu" ||
+    state.line1Mode === "ram" ||
+    state.line2Mode === "cpu" ||
+    state.line2Mode === "gpu" ||
+    state.line2Mode === "ram" ||
+    (state.details && state.details.includes("{")) ||
+    (state.state && state.state.includes("{")) ||
+    (state.largeText && state.largeText.includes("{")) ||
+    (state.smallText && state.smallText.includes("{"))
+  );
+
+  const viewingTab = document.getElementById("tab-health")?.classList.contains("active") || false;
+  return onProfile || viewingTab;
+}
+
+let healthPollTimer: number | null = null;
+
+function syncHealthPolling(): void {
+  const active = isHardwareActive();
+  if (active) {
+    if (!healthPollTimer) {
+      void fetchSystemHealth();
+      healthPollTimer = window.setInterval(() => {
+        if (isHardwareActive()) {
+          void fetchSystemHealth();
+        } else {
+          syncHealthPolling();
+        }
+      }, 5000);
+    }
+  } else {
+    if (healthPollTimer) {
+      window.clearInterval(healthPollTimer);
+      healthPollTimer = null;
+    }
+  }
 }
 
 function updatePreview(): void {
@@ -1259,9 +1310,15 @@ function updatePreview(): void {
 
 function updateArt(id: string, value: string): void {
   const art = must<HTMLDivElement>(id);
-  const isUrl = /^https?:\/\//i.test(value.trim());
+  const trimmed = value.trim();
+  const isUrl = /^https?:\/\//i.test(trimmed);
   art.classList.toggle("has-image", isUrl);
-  art.style.backgroundImage = isUrl ? `url("${CSS.escape(value.trim())}")` : "";
+  if (isUrl) {
+    const displayUrl = trimmed.includes("ufs.sh") ? `/api/frames/proxy?url=${encodeURIComponent(trimmed)}` : trimmed;
+    art.style.backgroundImage = `url("${CSS.escape(displayUrl)}")`;
+  } else {
+    art.style.backgroundImage = "";
+  }
 }
 
 function timestampLabel(): string {

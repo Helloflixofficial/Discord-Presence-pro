@@ -69,6 +69,7 @@ export interface SystemHealth {
 
 let lastCpuPercent = 0;
 let lastCpuCheckTime = 0;
+let hasNvidiaGpu: boolean | null = null;
 let rawGpuData: { name: string; pct: number; usedGb: string; totalGb: string; shortName: string } | null = null;
 let lastGpuCheckTime = 0;
 
@@ -83,7 +84,11 @@ function formatDuration(totalSeconds: number): string {
   return parts.join(" ") || "< 1m";
 }
 
-function calculateCpuUsage(sampleMs = 120): Promise<number> {
+function calculateCpuUsage(sampleMs = 80): Promise<number> {
+  // If sampled within the last 4 seconds, return cached value to avoid unnecessary CPU spin
+  if (Date.now() - lastCpuCheckTime < 4000 && lastCpuCheckTime > 0) {
+    return Promise.resolve(lastCpuPercent);
+  }
   const startCpus = os.cpus();
   return new Promise((resolve) => {
     setTimeout(() => {
@@ -112,13 +117,19 @@ function calculateCpuUsage(sampleMs = 120): Promise<number> {
 }
 
 async function checkGpuRaw(): Promise<void> {
-  if (Date.now() - lastGpuCheckTime < 4000 && rawGpuData !== null) {
+  // If previously determined that nvidia-smi is unavailable, do not spawn failing processes
+  if (hasNvidiaGpu === false) {
+    return;
+  }
+  // Cache GPU data for at least 8 seconds
+  if (Date.now() - lastGpuCheckTime < 8000 && rawGpuData !== null) {
     return;
   }
   try {
     const { stdout } = await execPromise(
       "nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits"
     );
+    hasNvidiaGpu = true;
     const line = stdout.trim().split("\n")[0];
     if (line) {
       const parts = line.split(",").map((s) => s.trim());
@@ -144,6 +155,7 @@ async function checkGpuRaw(): Promise<void> {
       return;
     }
   } catch {
+    hasNvidiaGpu = false;
     if (!rawGpuData) {
       rawGpuData = {
         name: "Dedicated GPU",
@@ -233,11 +245,16 @@ export function getSystemHealthSync(barStyle = "capsule"): SystemHealth {
 }
 
 export async function getSystemHealth(barStyle = "capsule"): Promise<SystemHealth> {
-  const promises: Promise<unknown>[] = [checkGpuRaw()];
-  if (Date.now() - lastCpuCheckTime > 2000) {
-    promises.push(calculateCpuUsage(100));
+  const promises: Promise<unknown>[] = [];
+  if (hasNvidiaGpu !== false) {
+    promises.push(checkGpuRaw());
   }
-  await Promise.all(promises);
+  if (Date.now() - lastCpuCheckTime > 3000) {
+    promises.push(calculateCpuUsage(80));
+  }
+  if (promises.length > 0) {
+    await Promise.all(promises);
+  }
   return getSystemHealthSync(barStyle);
 }
 

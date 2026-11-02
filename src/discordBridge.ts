@@ -2,7 +2,7 @@ import { Client } from "@xhayper/discord-rpc";
 import type { SetActivity, StatusDisplayType } from "@xhayper/discord-rpc";
 import type { BridgeStatus, PresenceConfig } from "./types.js";
 import { getFrames } from "./db.js";
-import { interpolatePlaceholders } from "./systemHealth.js";
+import { interpolatePlaceholders, getSystemHealth } from "./systemHealth.js";
 
 const activityTypeNames: Record<number, string> = {
   0: "Playing",
@@ -237,8 +237,9 @@ export class DiscordBridge {
         config.smallText?.includes("{")
       );
       if (hasPlaceholders && !this.healthRefreshInterval) {
-        this.healthRefreshInterval = setInterval(() => {
+        this.healthRefreshInterval = setInterval(async () => {
           if (this.client && this.config && !this.isAnimationRunning) {
+            await getSystemHealth(this.config.loadingBarStyle || "capsule").catch(() => {});
             this.update(this.config).catch(() => {});
           }
         }, 15000);
@@ -447,8 +448,10 @@ function buildActivity(
     detailsUrl: config.detailsUrl || undefined,
     stateUrl: config.stateUrl || undefined,
     largeImageKey: largeKey,
+    largeImageUrl: largeKey && isHttpUrl(largeKey) ? largeKey : undefined,
     largeImageText: config.largeText ? interpolatePlaceholders(config.largeText, barStyle) : undefined,
     smallImageKey: smallKey,
+    smallImageUrl: smallKey && isHttpUrl(smallKey) ? smallKey : undefined,
     smallImageText: config.smallText ? interpolatePlaceholders(config.smallText, barStyle) : undefined,
     buttons: buildButtons(config),
     statusDisplayType: (config.display as StatusDisplayType) ?? undefined,
